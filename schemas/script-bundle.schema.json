@@ -1,0 +1,545 @@
+{
+  "$defs": {
+    "AuthoringMetadata": {
+      "additionalProperties": false,
+      "properties": {
+        "agent_host": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "skill": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "skill"
+      ],
+      "type": "object"
+    },
+    "Bible": {
+      "additionalProperties": false,
+      "properties": {
+        "characters": {
+          "items": {
+            "$ref": "#/$defs/Character"
+          },
+          "type": "array"
+        },
+        "locations": {
+          "items": {
+            "$ref": "#/$defs/Location"
+          },
+          "type": "array"
+        },
+        "style": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "characters",
+        "locations",
+        "style"
+      ],
+      "type": "object"
+    },
+    "Camera": {
+      "additionalProperties": false,
+      "properties": {
+        "movement": {
+          "type": "string"
+        },
+        "screen_direction": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ScreenDirection"
+          },
+          "default": {},
+          "type": "object"
+        },
+        "shot_size": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "shot_size",
+        "movement"
+      ],
+      "type": "object"
+    },
+    "Character": {
+      "additionalProperties": false,
+      "properties": {
+        "age": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "appearance": {
+          "type": "string"
+        },
+        "fictional": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "personality": {
+          "type": "string"
+        },
+        "wardrobe": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "age",
+        "fictional",
+        "appearance",
+        "wardrobe",
+        "personality"
+      ],
+      "type": "object"
+    },
+    "Conditioning": {
+      "additionalProperties": false,
+      "properties": {
+        "first_frame": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "last_frame": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reference_images": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "reference_video": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "Continuity": {
+      "additionalProperties": false,
+      "properties": {
+        "from": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "handoff": {
+          "$ref": "#/$defs/Handoff"
+        },
+        "must_match": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ContinuityAttribute"
+          },
+          "type": "array"
+        },
+        "relation": {
+          "$ref": "#/$defs/ContinuityRelation"
+        },
+        "state_in": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "type": "object"
+        },
+        "state_out": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "type": "object"
+        }
+      },
+      "required": [
+        "relation",
+        "handoff"
+      ],
+      "type": "object"
+    },
+    "ContinuityAttribute": {
+      "enum": [
+        "wardrobe",
+        "location",
+        "prop_state",
+        "character_position",
+        "lighting"
+      ],
+      "type": "string"
+    },
+    "ContinuityRelation": {
+      "enum": [
+        "continuous",
+        "cut",
+        "new_scene",
+        "time_jump"
+      ],
+      "type": "string"
+    },
+    "DeliverySpec": {
+      "additionalProperties": false,
+      "properties": {
+        "fps": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "height": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "width": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "width",
+        "height",
+        "fps"
+      ],
+      "type": "object"
+    },
+    "DialogueLine": {
+      "additionalProperties": false,
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "who": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "who",
+        "text"
+      ],
+      "type": "object"
+    },
+    "GenerationPlan": {
+      "additionalProperties": false,
+      "properties": {
+        "audition_profile": {
+          "type": "string"
+        },
+        "audition_takes": {
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "final_profile": {
+          "type": "string"
+        },
+        "promotion": {
+          "$ref": "#/$defs/Promotion"
+        },
+        "risk": {
+          "$ref": "#/$defs/Risk"
+        }
+      },
+      "required": [
+        "risk",
+        "audition_takes",
+        "audition_profile",
+        "final_profile",
+        "promotion"
+      ],
+      "type": "object"
+    },
+    "Handoff": {
+      "enum": [
+        "none",
+        "stable_frame",
+        "approved_frame"
+      ],
+      "type": "string"
+    },
+    "Location": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "description"
+      ],
+      "type": "object"
+    },
+    "Operation": {
+      "enum": [
+        "t2v",
+        "i2v",
+        "flf2v",
+        "r2v"
+      ],
+      "type": "string"
+    },
+    "ProjectSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "content_boundaries": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "delivery": {
+          "$ref": "#/$defs/DeliverySpec"
+        },
+        "genre": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "language": {
+          "type": "string"
+        },
+        "logline": {
+          "type": "string"
+        },
+        "shot_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "target_duration_seconds": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "logline",
+        "genre",
+        "language",
+        "target_duration_seconds",
+        "shot_count",
+        "delivery"
+      ],
+      "type": "object"
+    },
+    "Promotion": {
+      "enum": [
+        "auto",
+        "manual"
+      ],
+      "type": "string"
+    },
+    "Risk": {
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "type": "string"
+    },
+    "ScreenDirection": {
+      "enum": [
+        "left",
+        "right",
+        "center"
+      ],
+      "type": "string"
+    },
+    "ShotContract": {
+      "additionalProperties": false,
+      "properties": {
+        "camera": {
+          "$ref": "#/$defs/Camera"
+        },
+        "characters": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "conditioning": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Conditioning"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "continuity": {
+          "$ref": "#/$defs/Continuity"
+        },
+        "dialogue": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/DialogueLine"
+          },
+          "type": "array"
+        },
+        "duration": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "fps": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "generation_plan": {
+          "$ref": "#/$defs/GenerationPlan"
+        },
+        "height": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "id": {
+          "type": "string"
+        },
+        "location": {
+          "type": "string"
+        },
+        "operation": {
+          "$ref": "#/$defs/Operation"
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "schema_version": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "width": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schema_version",
+        "id",
+        "title",
+        "duration",
+        "width",
+        "height",
+        "fps",
+        "operation",
+        "characters",
+        "location",
+        "camera",
+        "continuity",
+        "generation_plan",
+        "prompt"
+      ],
+      "type": "object"
+    },
+    "Story": {
+      "additionalProperties": false,
+      "properties": {
+        "beats": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "synopsis": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "synopsis",
+        "beats"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "authoring": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AuthoringMetadata"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "bible": {
+      "$ref": "#/$defs/Bible"
+    },
+    "project": {
+      "$ref": "#/$defs/ProjectSpec"
+    },
+    "schema_version": {
+      "type": "string"
+    },
+    "shots": {
+      "items": {
+        "$ref": "#/$defs/ShotContract"
+      },
+      "type": "array"
+    },
+    "story": {
+      "$ref": "#/$defs/Story"
+    }
+  },
+  "required": [
+    "schema_version",
+    "project",
+    "bible",
+    "story",
+    "shots"
+  ],
+  "title": "ScriptBundle",
+  "type": "object"
+}

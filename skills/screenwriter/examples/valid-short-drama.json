@@ -1,0 +1,167 @@
+{
+  "schema_version": "1.0",
+  "project": {
+    "id": "rain-apartment",
+    "title": "雨夜公寓",
+    "logline": "一场雨把两个已经决定分开的人困在同一扇门前。",
+    "genre": "情感悬疑",
+    "language": "zh-CN",
+    "target_duration_seconds": 10,
+    "shot_count": 2,
+    "delivery": {
+      "width": 960,
+      "height": 544,
+      "fps": 24
+    },
+    "content_boundaries": [
+      "角色均为虚构成年人",
+      "无真实公众人物",
+      "无伤害过程"
+    ]
+  },
+  "bible": {
+    "characters": [
+      {
+        "id": "zhao",
+        "name": "赵岚",
+        "age": 31,
+        "fictional": true,
+        "appearance": "短黑发，神情克制，眼下略有疲惫",
+        "wardrobe": "深灰针织开衫，白色内搭",
+        "personality": "习惯先处理问题，再承认情绪"
+      },
+      {
+        "id": "lin",
+        "name": "林默",
+        "age": 33,
+        "fictional": true,
+        "appearance": "微卷黑发，清瘦，目光回避",
+        "wardrobe": "黑色衬衫，袖口卷到手肘",
+        "personality": "不善解释，但会用行动拖延告别"
+      }
+    ],
+    "locations": [
+      {
+        "id": "apartment-living-room",
+        "name": "公寓客厅",
+        "description": "雨夜的旧公寓客厅，门口有湿伞，暖灯与窗外冷光相撞"
+      }
+    ],
+    "style": "克制的现实主义短剧，低饱和，表演优先，避免夸张运镜"
+  },
+  "story": {
+    "synopsis": "赵岚准备离开，林默用一句关于雨的话拖住她，两人都没有说出真正的告别。",
+    "beats": [
+      "赵岚拿起钥匙走向门口",
+      "林默提醒雨没有停，赵岚停住但没有回头"
+    ]
+  },
+  "shots": [
+    {
+      "schema_version": "1.0",
+      "id": "S01",
+      "title": "她走向门口",
+      "duration": 5,
+      "width": 960,
+      "height": 544,
+      "fps": 24,
+      "operation": "t2v",
+      "characters": ["zhao", "lin"],
+      "location": "apartment-living-room",
+      "camera": {
+        "shot_size": "medium",
+        "movement": "static",
+        "screen_direction": {
+          "zhao": "right",
+          "lin": "left"
+        }
+      },
+      "conditioning": null,
+      "continuity": {
+        "from": null,
+        "relation": "new_scene",
+        "handoff": "none",
+        "must_match": ["wardrobe", "location", "prop_state"],
+        "state_in": {
+          "zhao.position": "sofa",
+          "lin.position": "window",
+          "door": "closed"
+        },
+        "state_out": {
+          "zhao.position": "by-door",
+          "lin.position": "window",
+          "door": "closed"
+        }
+      },
+      "generation_plan": {
+        "risk": "high",
+        "audition_takes": 3,
+        "audition_profile": "audition",
+        "final_profile": "final",
+        "promotion": "manual"
+      },
+      "dialogue": [
+        {
+          "who": "zhao",
+          "text": "我下楼。"
+        }
+      ],
+      "prompt": "雨夜公寓客厅，中景固定机位。赵岚从沙发走到门口拿起钥匙，林默站在窗边看着她，两人的表演克制，保持服装和左右关系，画面内无文字。"
+    },
+    {
+      "schema_version": "1.0",
+      "id": "S02",
+      "title": "雨还没停",
+      "duration": 5,
+      "width": 960,
+      "height": 544,
+      "fps": 24,
+      "operation": "t2v",
+      "characters": ["zhao", "lin"],
+      "location": "apartment-living-room",
+      "camera": {
+        "shot_size": "medium_close_up",
+        "movement": "static",
+        "screen_direction": {
+          "zhao": "right",
+          "lin": "left"
+        }
+      },
+      "conditioning": null,
+      "continuity": {
+        "from": "S01",
+        "relation": "continuous",
+        "handoff": "none",
+        "must_match": ["wardrobe", "location", "prop_state"],
+        "state_in": {
+          "zhao.position": "by-door",
+          "lin.position": "window",
+          "door": "closed"
+        },
+        "state_out": {
+          "zhao.position": "by-door",
+          "lin.position": "window",
+          "door": "closed"
+        }
+      },
+      "generation_plan": {
+        "risk": "high",
+        "audition_takes": 3,
+        "audition_profile": "audition",
+        "final_profile": "final",
+        "promotion": "manual"
+      },
+      "dialogue": [
+        {
+          "who": "lin",
+          "text": "雨还没停。"
+        }
+      ],
+      "prompt": "延续上一镜的雨夜客厅与人物状态，中近景固定机位。林默看向门口轻声开口，赵岚握着钥匙停住但不回头，保持视线方向、服装、门和湿伞状态，画面内无文字。"
+    }
+  ],
+  "authoring": {
+    "skill": "screenwriter/v1",
+    "agent_host": "example"
+  }
+}

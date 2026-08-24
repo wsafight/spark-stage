@@ -1,0 +1,4 @@
+interface:
+  display_name: "SparkStage Screenwriter"
+  short_description: "Generate validated SparkStage short-drama contracts"
+  default_prompt: "Use $screenwriter to turn my brief into a valid SparkStage ScriptBundle."

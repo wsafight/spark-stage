@@ -1,0 +1,11 @@
+pub mod adapter;
+pub mod cli;
+pub mod domain;
+pub mod ipc;
+pub mod media;
+pub mod paths;
+pub mod preflight;
+pub mod store;
+pub mod tui;
+pub mod validation;
+pub mod worker;

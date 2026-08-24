@@ -1,0 +1,28 @@
+schema_version: "1.0"
+adapter: minimax-h3-comfy
+enabled: false
+endpoint: http://127.0.0.1:8188
+allow_remote: false
+allow_global_interrupt: false
+workflow: ../workflows/minimax-h3-api.json
+
+# Replace every placeholder with the node IDs and input names from the API workflow
+# exported by the ComfyUI instance on this DGX Spark.
+output_node: "REPLACE_OUTPUT_NODE"
+model_fingerprint: "REPLACE_WITH_MODEL_FILENAMES_AND_HASHES"
+bindings:
+  prompt: { node: "REPLACE_PROMPT_NODE", input: "REPLACE_PROMPT_INPUT" }
+  seed: { node: "REPLACE_SEED_NODE", input: "REPLACE_SEED_INPUT" }
+  output_prefix: { node: "REPLACE_OUTPUT_NODE", input: "REPLACE_PREFIX_INPUT" }
+
+# Add only controls that exist in the exported workflow.
+optional_bindings: {}
+
+profiles:
+  baseline: {}
+  audition: {}
+  final: {}
+
+# Add t2v, i2v, flf2v, or r2v only after that exact operation completes a local
+# smoke test with the current workflow, nodes, models, CUDA and PyTorch build.
+verified_operations: []

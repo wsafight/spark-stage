@@ -1,0 +1,54 @@
+{
+  "schema_version": "1.0",
+  "project": {
+    "id": "invalid-example",
+    "title": "非法示例",
+    "logline": "这个文件只展示不能进入文案合同的字段。",
+    "genre": "测试",
+    "language": "zh-CN",
+    "target_duration_seconds": 5,
+    "shot_count": 1,
+    "delivery": {"width": 960, "height": 544, "fps": 24},
+    "content_boundaries": []
+  },
+  "bible": {
+    "characters": [],
+    "locations": [{"id": "room", "name": "房间", "description": "空房间"}],
+    "style": "测试"
+  },
+  "story": {"synopsis": "测试", "beats": ["测试"]},
+  "shots": [
+    {
+      "schema_version": "1.0",
+      "id": "S01",
+      "title": "非法 workflow 字段",
+      "duration": 5,
+      "width": 960,
+      "height": 544,
+      "fps": 24,
+      "operation": "t2v",
+      "characters": [],
+      "location": "room",
+      "camera": {"shot_size": "wide", "movement": "static", "screen_direction": {}},
+      "conditioning": null,
+      "continuity": {
+        "from": null,
+        "relation": "new_scene",
+        "handoff": "none",
+        "must_match": [],
+        "state_in": {},
+        "state_out": {}
+      },
+      "generation_plan": {
+        "risk": "low",
+        "audition_takes": 1,
+        "audition_profile": "audition",
+        "final_profile": "final",
+        "promotion": "manual"
+      },
+      "dialogue": [],
+      "prompt": "空房间的固定广角镜头，画面内无文字。",
+      "steps": 12
+    }
+  ]
+}
