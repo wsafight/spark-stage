@@ -1,6 +1,8 @@
 use super::*;
 use crate::adapter::CameraAdapter;
 
+mod http;
+
 fn workflow() -> Value {
     json!({
         "45": {"class_type": "TextNode", "inputs": {"text": "old"}},
@@ -10,7 +12,7 @@ fn workflow() -> Value {
     })
 }
 
-fn config(workflow: PathBuf) -> ComfyAdapterConfig {
+pub(super) fn config(workflow: PathBuf) -> ComfyAdapterConfig {
     ComfyAdapterConfig {
         schema_version: "1.0".to_owned(),
         adapter: "minimax-h3-comfy".to_owned(),

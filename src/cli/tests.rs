@@ -127,3 +127,63 @@ fn shot_selection_expands_ranges_and_rejects_ambiguous_values() {
     assert!(expand_shot_selection("S01-T03").is_err());
     assert!(expand_shot_selection("S01,,S03").is_err());
 }
+
+#[test]
+fn control_commands_parse_stable_resource_ids() {
+    let queue = Cli::try_parse_from([
+        "sparkstage",
+        "queue",
+        "cancel",
+        "--project",
+        "rain-apartment",
+        "--job",
+        "JOB-01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    ])
+    .unwrap();
+    assert!(matches!(queue.command, Command::Queue(_)));
+
+    let approval = Cli::try_parse_from([
+        "sparkstage",
+        "approval",
+        "approve",
+        "--project",
+        "rain-apartment",
+        "--approval",
+        "APR-01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    ])
+    .unwrap();
+    assert!(matches!(approval.command, Command::Approval(_)));
+
+    for arguments in [
+        ["diagnostics", "retry", "--probe", "worker"],
+        ["logs", "open", "--project", "rain-apartment"],
+    ] {
+        let mut command = vec!["sparkstage"];
+        command.extend(arguments);
+        if command[1] == "diagnostics" {
+            command.extend(["--project", "rain-apartment"]);
+        }
+        Cli::try_parse_from(command).unwrap();
+    }
+}
+
+#[test]
+fn worker_business_failure_returns_invalid_exit_code() {
+    let reply = WorkerReply {
+        protocol_version: crate::ipc::IPC_PROTOCOL_VERSION.to_owned(),
+        command_id: "command".to_owned(),
+        ok: false,
+        revision: Some(7),
+        snapshot: None,
+        artifact_path: None,
+        message: None,
+        error: Some(crate::ipc::WorkerError {
+            code: "REVISION_CONFLICT".to_owned(),
+            message: "refresh first".to_owned(),
+            retryable: true,
+            current_revision: Some(7),
+        }),
+    };
+
+    assert_eq!(reply_exit_code(&reply), ExitCode::from(EXIT_INVALID));
+}

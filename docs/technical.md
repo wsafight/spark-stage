@@ -752,7 +752,7 @@ Ratatui 与 Crossterm 的精确版本由第一次 aarch64 编译验证后锁定�
 
 ### 23.1 当前实现边界
 
-截至 2026-08-25，本地代码与无 GPU 测试已覆盖项目存储、worker IPC、文案合同批准、队列暂停/恢复/取消、候选与 take 决策、自动 audition 批次、build 执行与恢复、stale 传播、人工终片 gate、联系表命令构造、CLI/TUI 控制面，以及通过本地 mock 验证的 ComfyUI 全局 interrupt 协议。这里的“已覆盖”表示控制逻辑、状态转换和错误路径可测试，不表示 MiniMax H3 workflow 或 DGX Spark 性能已经验证。
+截至 2026-08-25，本地代码与无 GPU 测试已覆盖项目存储、worker IPC、文案合同批准、队列暂停/恢复/取消、候选与 take 决策、自动 audition 批次、build 执行与恢复、stale 传播、人工终片 gate、联系表命令构造和 CLI/TUI 控制面。ComfyUI mock 已验证 `/prompt` 的 request identity、`/history` 成功与执行失败、WebSocket 断线后的 history 收口、非法输出路径拒绝和全局 interrupt 协议。这里的“已覆盖”表示控制逻辑、状态转换和错误路径可测试，不表示 MiniMax H3 workflow 或 DGX Spark 性能已经验证。
 
 仍需在 DGX Spark 完成：导出并绑定真实 H3 API workflow，确认 prompt、seed、输出、模型指纹和原生音轨，实测 T2V 与任何 I2V / FLF2V / R2V 能力，验证完整 FFmpeg build 与联系表产物，以及记录 audition/final 的冷启动、稳态耗时、显存和质量基线。在这些结果落盘前，相关 capability 必须保持未验证或禁用。
 

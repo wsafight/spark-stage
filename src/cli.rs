@@ -12,6 +12,15 @@ use crate::ipc::{WorkerClient, WorkerCommand as IpcCommand, WorkerReply};
 use crate::paths::AppPaths;
 use crate::validation::{ValidationIssue, json_schema, validate_json};
 
+mod control;
+mod output;
+
+use control::{
+    ApprovalArgs, DiagnosticsArgs, LogsArgs, QueueArgs, execute_approval, execute_diagnostics,
+    execute_logs, execute_queue,
+};
+use output::{print_reply, reply_exit_code};
+
 const EXIT_ERROR: u8 = 1;
 const EXIT_INVALID: u8 = 2;
 
@@ -40,6 +49,14 @@ enum Command {
     Shots(ShotsArgs),
     /// Assemble reviewed takes into draft, trailer, or final outputs.
     Edit(EditArgs),
+    /// Inspect or control the shared production queue.
+    Queue(QueueArgs),
+    /// Resolve a pending approval by its stable ID.
+    Approval(ApprovalArgs),
+    /// Refresh worker diagnostic probes.
+    Diagnostics(DiagnosticsArgs),
+    /// Resolve project logs for inspection.
+    Logs(LogsArgs),
     /// Open the Ratatui production console connected to the worker.
     Tui(TuiArgs),
 }
@@ -402,6 +419,10 @@ fn execute(cli: Cli) -> Result<ExitCode, CliError> {
         },
         Command::Shots(args) => execute_shots(args),
         Command::Edit(args) => execute_edit(args),
+        Command::Queue(args) => execute_queue(args),
+        Command::Approval(args) => execute_approval(args),
+        Command::Diagnostics(args) => execute_diagnostics(args),
+        Command::Logs(args) => execute_logs(args),
         Command::Tui(args) => {
             crate::tui::run(crate::tui::TuiOptions {
                 socket: args.socket.unwrap_or_else(crate::tui::default_socket_path),
@@ -476,7 +497,7 @@ fn execute_edit(args: EditArgs) -> Result<ExitCode, CliError> {
     };
     let reply = client.send(command, revision)?;
     print_reply(&reply, json)?;
-    Ok(ExitCode::SUCCESS)
+    Ok(reply_exit_code(&reply))
 }
 
 fn expand_shot_selection(value: &str) -> Result<Vec<String>, String> {
@@ -663,7 +684,7 @@ fn execute_worker(args: WorkerArgs) -> Result<ExitCode, CliError> {
             let client = WorkerClient::new(resolved_paths(&connection).socket, None);
             let reply = client.send(IpcCommand::Health, None)?;
             print_reply(&reply, json)?;
-            Ok(ExitCode::SUCCESS)
+            Ok(reply_exit_code(&reply))
         }
     }
 }
@@ -693,7 +714,7 @@ fn execute_project(args: ProjectArgs) -> Result<ExitCode, CliError> {
                 None,
             )?;
             print_reply(&reply, json)?;
-            Ok(ExitCode::SUCCESS)
+            Ok(reply_exit_code(&reply))
         }
         ProjectSubcommand::Status {
             project,
@@ -703,7 +724,7 @@ fn execute_project(args: ProjectArgs) -> Result<ExitCode, CliError> {
             let client = WorkerClient::new(resolved_paths(&connection).socket, project);
             let reply = client.send(IpcCommand::Snapshot, None)?;
             print_reply(&reply, json)?;
-            Ok(ExitCode::SUCCESS)
+            Ok(reply_exit_code(&reply))
         }
     }
 }
@@ -728,7 +749,7 @@ fn apply_script(
         Some(revision),
     )?;
     print_reply(&reply, json)?;
-    Ok(ExitCode::SUCCESS)
+    Ok(reply_exit_code(&reply))
 }
 
 fn approve_script(
@@ -740,7 +761,7 @@ fn approve_script(
     let revision = current_revision(&client)?;
     let reply = client.send(IpcCommand::ApproveScript, Some(revision))?;
     print_reply(&reply, json)?;
-    Ok(ExitCode::SUCCESS)
+    Ok(reply_exit_code(&reply))
 }
 
 fn current_revision(client: &WorkerClient) -> Result<u64, CliError> {
@@ -801,28 +822,6 @@ fn infer_title(brief: &str, project_id: &str) -> String {
         .map(|line| line.trim_start_matches('#').trim().to_owned())
         .filter(|line| !line.is_empty())
         .unwrap_or_else(|| project_id.replace('-', " "))
-}
-
-fn print_reply(reply: &WorkerReply, machine_readable: bool) -> Result<(), CliError> {
-    if machine_readable {
-        println!("{}", serde_json::to_string_pretty(reply)?);
-        return Ok(());
-    }
-    if let Some(message) = &reply.message {
-        println!("{message}");
-    }
-    if let Some(snapshot) = &reply.snapshot {
-        println!(
-            "{}: stage={}, outcome={}, revision={}, shots={}, approvals={}",
-            snapshot.project.id,
-            snapshot.project.stage,
-            snapshot.project.outcome,
-            snapshot.revision,
-            snapshot.shots.len(),
-            snapshot.pending_approvals.len()
-        );
-    }
-    Ok(())
 }
 
 fn execute_preflight(args: PreflightArgs) -> Result<ExitCode, CliError> {

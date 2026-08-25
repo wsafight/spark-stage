@@ -275,7 +275,9 @@ state.json                       # 可续跑的当前状态
 | 选中候选并晋级 | `sparkstage shots promote S06 --take S06-T002` |
 | 直接拍全部或指定镜头 | `sparkstage shots render`、`sparkstage shots render S04-S07` |
 | 重拍 / 通过一个 take | `sparkstage shots retry S06`、`sparkstage shots approve S06 --take S06-T002` |
-| 看队列 / 暂停 / 恢复 | `sparkstage queue list`、`sparkstage queue pause`、`sparkstage queue resume` |
+| 看队列 / 暂停 / 恢复 / 取消任务 | `sparkstage queue list --project <id>`、`sparkstage queue pause --project <id>`、`sparkstage queue resume --project <id>`、`sparkstage queue cancel --project <id> --job <job-id>` |
+| 处理通用审批 | `sparkstage approval approve --project <id> --approval <approval-id>` |
+| 刷新诊断 / 查看日志 | `sparkstage diagnostics retry --project <id> --probe worker`、`sparkstage logs open --project <id>` |
 | 拼局部动态草稿、全片正片或预告 | `sparkstage edit build --kind draft --shots S04-S07`、`sparkstage edit build --kind final`、`sparkstage edit trailer` |
 | 看占盘 / 安全清理 | `sparkstage storage status`、`sparkstage storage clean --dry-run` |
 
