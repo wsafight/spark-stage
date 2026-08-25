@@ -86,6 +86,11 @@ impl WorkerClient {
     pub fn socket(&self) -> &std::path::Path {
         &self.socket
     }
+
+    #[must_use]
+    pub fn project_id(&self) -> Option<&str> {
+        self.project_id.as_deref()
+    }
 }
 
 #[derive(Debug, Error)]

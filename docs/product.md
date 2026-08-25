@@ -276,7 +276,7 @@ state.json                       # 可续跑的当前状态
 | 直接拍全部或指定镜头 | `sparkstage shots render`、`sparkstage shots render S04-S07` |
 | 重拍 / 通过一个 take | `sparkstage shots retry S06`、`sparkstage shots approve S06 --take S06-T002` |
 | 看队列 / 暂停 / 恢复 | `sparkstage queue list`、`sparkstage queue pause`、`sparkstage queue resume` |
-| 出正片或预告 | `sparkstage edit build`、`sparkstage edit trailer` |
+| 拼局部动态草稿、全片正片或预告 | `sparkstage edit build --kind draft --shots S04-S07`、`sparkstage edit build --kind final`、`sparkstage edit trailer` |
 | 看占盘 / 安全清理 | `sparkstage storage status`、`sparkstage storage clean --dry-run` |
 
 Agent 可以替用户调用这些命令，但不能绕开命令面直接改运行态文件。

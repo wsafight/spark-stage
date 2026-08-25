@@ -1,18 +1,24 @@
 use super::*;
 
+mod approvals;
+mod cancellation;
+mod diagnostics;
+
 impl WorkerRuntime {
     pub(super) fn execute(&mut self, request: &ClientRequest) -> WorkerReply {
         match &request.command {
             WorkerCommand::Health => success(request, None, None, "worker is ready"),
-            WorkerCommand::Snapshot => match self.snapshot_for(request.project_id.as_deref()) {
-                Ok(snapshot) => success(
-                    request,
-                    Some(snapshot.revision),
-                    Some(snapshot),
-                    "snapshot loaded",
-                ),
-                Err(error) => worker_failure(request, error),
-            },
+            WorkerCommand::Snapshot | WorkerCommand::Subscribe { .. } => {
+                match self.snapshot_for(request.project_id.as_deref()) {
+                    Ok(snapshot) => success(
+                        request,
+                        Some(snapshot.revision),
+                        Some(snapshot),
+                        "snapshot loaded",
+                    ),
+                    Err(error) => worker_failure(request, error),
+                }
+            }
             WorkerCommand::CreateProject {
                 project_id,
                 title,
@@ -20,9 +26,7 @@ impl WorkerRuntime {
             } => self.create_project(request, project_id, title, brief),
             WorkerCommand::ApplyScript { bundle_json } => self.apply_script(request, bundle_json),
             WorkerCommand::ApproveScript => self.approve_script(request, None),
-            WorkerCommand::Approve { approval_id } => {
-                self.approve_script(request, Some(approval_id))
-            }
+            WorkerCommand::Approve { approval_id } => self.approve(request, approval_id),
             WorkerCommand::AuditionShot { shot_id } => self.enqueue_shot(request, shot_id, true),
             WorkerCommand::RenderShot { shot_id } => self.enqueue_shot(request, shot_id, false),
             WorkerCommand::RetryShot { shot_id } => self.retry_shot(request, shot_id),
@@ -38,14 +42,254 @@ impl WorkerRuntime {
             WorkerCommand::PreviewTake { take_id } => self.preview_take(request, take_id),
             WorkerCommand::PauseQueue => self.set_queue_paused(request, true),
             WorkerCommand::ResumeQueue => self.set_queue_paused(request, false),
-            WorkerCommand::CancelJob { job_id } => self.cancel_pending_job(request, job_id),
-            _ => failure(
+            WorkerCommand::CancelJob { job_id } => self.cancel_job(request, job_id),
+            WorkerCommand::Build { kind, shot_ids } => self.build(request, kind, shot_ids),
+            WorkerCommand::OpenBuild { build_id } => self.open_build(request, build_id),
+            WorkerCommand::RetryProbe { probe_id } => self.retry_probe(request, probe_id),
+            WorkerCommand::OpenLogs => self.open_logs(request),
+        }
+    }
+
+    fn build(&mut self, request: &ClientRequest, kind: &str, shot_ids: &[String]) -> WorkerReply {
+        let Some(expected_revision) = request.expected_revision else {
+            return missing_revision(request);
+        };
+        let store = match self.project_store(request.project_id.as_deref()) {
+            Ok(store) => store,
+            Err(error) => return worker_failure(request, error),
+        };
+        let state = match store.read_state() {
+            Ok(state) => state,
+            Err(error) => return store_failure(request, error),
+        };
+        if state.revision != expected_revision {
+            return store_failure(
                 request,
-                "NOT_IMPLEMENTED",
-                "this production command is not implemented yet".to_owned(),
+                StoreError::RevisionConflict {
+                    expected: expected_revision,
+                    actual: state.revision,
+                },
+            );
+        }
+        if let Some(approval) = state
+            .pending_approvals
+            .iter()
+            .find(|approval| approval.blocking)
+        {
+            return failure(
+                request,
+                "APPROVAL_REQUIRED",
+                format!(
+                    "resolve approval `{}` before building",
+                    approval.approval_id
+                ),
                 false,
-                self.project_revision(request.project_id.as_deref()),
+                Some(state.revision),
+            );
+        }
+        let kind = match crate::build::BuildKind::parse(kind) {
+            Ok(kind) => kind,
+            Err(error) => {
+                return failure(
+                    request,
+                    "BUILD_KIND_INVALID",
+                    error.to_string(),
+                    false,
+                    Some(state.revision),
+                );
+            }
+        };
+        if !shot_ids.is_empty() && kind != crate::build::BuildKind::Draft {
+            return failure(
+                request,
+                "BUILD_SCOPE_INVALID",
+                "a shot selection is only valid for a draft build; final and trailer builds must cover the full contract"
+                    .to_owned(),
+                false,
+                Some(state.revision),
+            );
+        }
+        let bundle = match store.read_active_bundle() {
+            Ok(Some(bundle)) => bundle,
+            Ok(None) => {
+                return failure(
+                    request,
+                    "ACTIVE_CONTRACT_REQUIRED",
+                    "approve a ScriptBundle before building".to_owned(),
+                    false,
+                    Some(state.revision),
+                );
+            }
+            Err(error) => return store_failure(request, error),
+        };
+        let build_id = format!("BLD-{}", Ulid::new());
+        let recipe = match crate::build::plan_selected(&build_id, kind, &state, &bundle, shot_ids) {
+            Ok(recipe) => recipe,
+            Err(error) => {
+                return failure(
+                    request,
+                    "BUILD_INPUT_INVALID",
+                    error.to_string(),
+                    false,
+                    Some(state.revision),
+                );
+            }
+        };
+        for input in &recipe.inputs {
+            let media = store.root().join(&input.media_path);
+            if !media.is_file() {
+                return failure(
+                    request,
+                    "BUILD_INPUT_NOT_FOUND",
+                    format!(
+                        "take `{}` media is missing at {}",
+                        input.take_id,
+                        media.display()
+                    ),
+                    false,
+                    Some(state.revision),
+                );
+            }
+        }
+        match crate::build::missing_runtime_capabilities() {
+            Ok(missing) if !missing.is_empty() => {
+                return failure(
+                    request,
+                    "BUILD_CAPABILITY_MISSING",
+                    format!(
+                        "ffmpeg build capabilities are missing: {}",
+                        missing.join(", ")
+                    ),
+                    false,
+                    Some(state.revision),
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                return failure(
+                    request,
+                    "BUILD_CAPABILITY_PROBE_FAILED",
+                    error.to_string(),
+                    true,
+                    Some(state.revision),
+                );
+            }
+        }
+        let recipe_path = PathBuf::from("builds").join(&build_id).join("recipe.json");
+        if let Err(error) = write_json_atomic(&store.root().join(&recipe_path), &recipe) {
+            return store_failure(request, error);
+        }
+        let build = crate::domain::BuildRecord {
+            build_id: build_id.clone(),
+            kind: kind.as_str().to_owned(),
+            status: "queued".to_owned(),
+            recipe: recipe_path.to_string_lossy().into_owned(),
+            command_id: request.command_id.clone(),
+            output_path: None,
+            warnings: Vec::new(),
+            stale: false,
+        };
+        let running =
+            match store.start_build(build, expected_revision, &request.command_id, &timestamp()) {
+                Ok(state) => state,
+                Err(error) => return store_failure(request, error),
+            };
+        if let Err(message) = self.build_executor.send(BuildRequest {
+            project_id: state.project_id.clone(),
+            project_root: store.root().to_owned(),
+            command_id: request.command_id.clone(),
+            recipe,
+        }) {
+            let failed = match store.finish_build(
+                &build_id,
+                None,
+                Some(message.clone()),
+                false,
+                running.revision,
+                &request.command_id,
+                &timestamp(),
+            ) {
+                Ok(state) => state,
+                Err(error) => return store_failure(request, error),
+            };
+            return failure(
+                request,
+                "BUILD_EXECUTOR_UNAVAILABLE",
+                message,
+                true,
+                Some(failed.revision),
+            );
+        }
+        match self.snapshot(&store, running) {
+            Ok(snapshot) => success(
+                request,
+                Some(snapshot.revision),
+                Some(snapshot),
+                "build queued",
             ),
+            Err(error) => worker_failure(request, error),
+        }
+    }
+
+    fn open_build(&self, request: &ClientRequest, build_id: &str) -> WorkerReply {
+        let store = match self.project_store(request.project_id.as_deref()) {
+            Ok(store) => store,
+            Err(error) => return worker_failure(request, error),
+        };
+        let state = match store.read_state() {
+            Ok(state) => state,
+            Err(error) => return store_failure(request, error),
+        };
+        let Some(build) = state.builds.get(build_id) else {
+            return failure(
+                request,
+                "BUILD_NOT_FOUND",
+                format!("build `{build_id}` does not exist"),
+                false,
+                Some(state.revision),
+            );
+        };
+        let Some(relative) = build.output_path.as_ref() else {
+            return failure(
+                request,
+                "BUILD_OUTPUT_MISSING",
+                format!("build `{build_id}` has no output"),
+                false,
+                Some(state.revision),
+            );
+        };
+        if relative.is_absolute()
+            || relative
+                .components()
+                .any(|component| !matches!(component, Component::Normal(_) | Component::CurDir))
+        {
+            return failure(
+                request,
+                "ARTIFACT_PATH_INVALID",
+                format!("build `{build_id}` has an unsafe output path"),
+                false,
+                Some(state.revision),
+            );
+        }
+        let output = store.root().join(relative);
+        if !output.is_file() {
+            return failure(
+                request,
+                "ARTIFACT_NOT_FOUND",
+                format!("build output is missing at {}", output.display()),
+                false,
+                Some(state.revision),
+            );
+        }
+        WorkerReply {
+            protocol_version: IPC_PROTOCOL_VERSION.to_owned(),
+            command_id: request.command_id.clone(),
+            ok: true,
+            revision: Some(state.revision),
+            snapshot: None,
+            artifact_path: Some(output),
+            message: Some("build output ready".to_owned()),
+            error: None,
         }
     }
 
@@ -168,7 +412,7 @@ impl WorkerRuntime {
     fn approve_script(
         &mut self,
         request: &ClientRequest,
-        approval_id: Option<&String>,
+        approval_id: Option<&str>,
     ) -> WorkerReply {
         let Some(expected_revision) = request.expected_revision else {
             return missing_revision(request);
@@ -178,7 +422,7 @@ impl WorkerRuntime {
             Err(error) => return worker_failure(request, error),
         };
         match store.approve_script(
-            approval_id.map(String::as_str),
+            approval_id,
             expected_revision,
             &request.command_id,
             &timestamp(),
@@ -280,7 +524,9 @@ impl WorkerRuntime {
                 return false;
             }
             match approval.kind {
-                ApprovalKind::ScriptBundle | ApprovalKind::BudgetOverrun => true,
+                ApprovalKind::ScriptBundle
+                | ApprovalKind::BudgetOverrun
+                | ApprovalKind::BuildReview => true,
                 ApprovalKind::CandidateSelection => {
                     !audition && approval.shot_id.as_deref() == Some(shot_id)
                 }
@@ -448,7 +694,14 @@ impl WorkerRuntime {
             state: JobState::Queued,
             attempts: Vec::new(),
         };
-        let state = match store.enqueue_job(&job, expected_revision, &request.command_id, &now) {
+        let audition_target_takes = audition.then_some(shot.generation_plan.audition_takes);
+        let state = match store.enqueue_job_with_audition_target(
+            &job,
+            expected_revision,
+            &request.command_id,
+            &now,
+            audition_target_takes,
+        ) {
             Ok(state) => state,
             Err(error) => return store_failure(request, error),
         };
@@ -592,94 +845,6 @@ impl WorkerRuntime {
         }
         let audition = shot.selected_candidate_take_id.is_none();
         self.enqueue_shot(request, shot_id, audition)
-    }
-
-    fn cancel_pending_job(&mut self, request: &ClientRequest, job_id: &str) -> WorkerReply {
-        let Some(expected_revision) = request.expected_revision else {
-            return missing_revision(request);
-        };
-        let Some(next_queue_revision) = self.queue.revision.checked_add(1) else {
-            return failure(
-                request,
-                "QUEUE_REVISION_OVERFLOW",
-                "queue revision cannot be incremented".to_owned(),
-                false,
-                self.project_revision(request.project_id.as_deref()),
-            );
-        };
-        if self
-            .queue
-            .running
-            .as_ref()
-            .is_some_and(|entry| entry.job_id == job_id)
-        {
-            return failure(
-                request,
-                "JOB_ALREADY_RUNNING",
-                format!(
-                    "job `{job_id}` is already running; backend cancellation requires a verified H3 interrupt capability"
-                ),
-                false,
-                self.project_revision(request.project_id.as_deref()),
-            );
-        }
-        let Some(entry) = self
-            .queue
-            .pending
-            .iter()
-            .find(|entry| entry.job_id == job_id)
-            .cloned()
-        else {
-            return failure(
-                request,
-                "JOB_NOT_FOUND",
-                format!("pending job `{job_id}` was not found"),
-                false,
-                self.project_revision(request.project_id.as_deref()),
-            );
-        };
-        if request.project_id.as_deref() != Some(entry.project_id.as_str()) {
-            return failure(
-                request,
-                "JOB_PROJECT_MISMATCH",
-                format!("job `{job_id}` belongs to project `{}`", entry.project_id),
-                false,
-                self.project_revision(request.project_id.as_deref()),
-            );
-        }
-        let store = match self.project_store(Some(&entry.project_id)) {
-            Ok(store) => store,
-            Err(error) => return worker_failure(request, error),
-        };
-        let state = match store.cancel_queued_job(
-            job_id,
-            expected_revision,
-            &request.command_id,
-            &timestamp(),
-        ) {
-            Ok(state) => state,
-            Err(error) => return store_failure(request, error),
-        };
-
-        let mut next_queue = self.queue.clone();
-        next_queue.pending.retain(|entry| entry.job_id != job_id);
-        next_queue.revision = next_queue_revision;
-        next_queue.last_command_id = Some(request.command_id.clone());
-        if let Err(error) = write_json_atomic(&self.paths.queue_file(), &next_queue) {
-            eprintln!(
-                "queue snapshot write failed after cancelling durable job {job_id}; it will be rebuilt: {error}"
-            );
-        }
-        self.queue = next_queue;
-        match self.snapshot(&store, state) {
-            Ok(snapshot) => success(
-                request,
-                Some(snapshot.revision),
-                Some(snapshot),
-                "pending job cancelled",
-            ),
-            Err(error) => worker_failure(request, error),
-        }
     }
 
     fn preview_take(&self, request: &ClientRequest, take_id: &str) -> WorkerReply {

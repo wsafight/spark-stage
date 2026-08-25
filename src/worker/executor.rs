@@ -1,6 +1,8 @@
+use std::collections::HashSet;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::adapter::{
@@ -86,6 +88,10 @@ pub(crate) enum ExecutorEvent {
         code: String,
         message: String,
     },
+    Cancelled {
+        job_id: String,
+        request_id: String,
+    },
 }
 
 impl ExecutorEvent {
@@ -107,18 +113,50 @@ impl ExecutorEvent {
 pub(crate) struct ExecutorHandle {
     requests: Sender<Box<ExecutorRequest>>,
     events: Receiver<ExecutorEvent>,
+    cancellation: ExecutorCancellation,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ExecutorCancellation {
+    requested: Arc<Mutex<HashSet<String>>>,
+}
+
+impl ExecutorCancellation {
+    pub(crate) fn request(&self, job_id: &str) {
+        self.requested
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(job_id.to_owned());
+    }
+
+    async fn wait(&self, job_id: &str) {
+        loop {
+            if self
+                .requested
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(job_id)
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
 }
 
 impl ExecutorHandle {
     pub(crate) fn spawn() -> std::io::Result<Self> {
         let (request_tx, request_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
+        let cancellation = ExecutorCancellation::default();
+        let executor_cancellation = cancellation.clone();
         std::thread::Builder::new()
             .name("sparkstage-camera".to_owned())
-            .spawn(move || executor_thread(request_rx, &event_tx))?;
+            .spawn(move || executor_thread(request_rx, &event_tx, &executor_cancellation))?;
         Ok(Self {
             requests: request_tx,
             events: event_rx,
+            cancellation,
         })
     }
 
@@ -131,9 +169,17 @@ impl ExecutorHandle {
     pub(crate) fn try_recv(&self) -> Result<ExecutorEvent, TryRecvError> {
         self.events.try_recv()
     }
+
+    pub(crate) fn cancellation(&self) -> ExecutorCancellation {
+        self.cancellation.clone()
+    }
 }
 
-fn executor_thread(requests: Receiver<Box<ExecutorRequest>>, events: &Sender<ExecutorEvent>) {
+fn executor_thread(
+    requests: Receiver<Box<ExecutorRequest>>,
+    events: &Sender<ExecutorEvent>,
+    cancellation: &ExecutorCancellation,
+) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -145,15 +191,19 @@ fn executor_thread(requests: Receiver<Box<ExecutorRequest>>, events: &Sender<Exe
         }
     };
     while let Ok(request) = requests.recv() {
-        runtime.block_on(process(*request, events));
+        runtime.block_on(process(*request, events, cancellation));
     }
 }
 
-async fn process(request: ExecutorRequest, events: &Sender<ExecutorEvent>) {
+async fn process(
+    request: ExecutorRequest,
+    events: &Sender<ExecutorEvent>,
+    cancellation: &ExecutorCancellation,
+) {
     match request {
         ExecutorRequest::Prepare(context) => prepare(context, events).await,
         ExecutorRequest::Submit { context, prepared } => {
-            submit(context, prepared, events).await;
+            submit(context, prepared, events, cancellation).await;
         }
         ExecutorRequest::Reconcile {
             context,
@@ -169,6 +219,7 @@ async fn process(request: ExecutorRequest, events: &Sender<ExecutorEvent>) {
                 workflow_hash,
                 backend_job_id,
                 events,
+                cancellation,
             )
             .await;
         }
@@ -218,7 +269,12 @@ async fn prepare(context: ExecutionContext, events: &Sender<ExecutorEvent>) {
     }
 }
 
-async fn submit(context: ExecutionContext, prepared: PreparedJob, events: &Sender<ExecutorEvent>) {
+async fn submit(
+    context: ExecutionContext,
+    prepared: PreparedJob,
+    events: &Sender<ExecutorEvent>,
+    cancellation: &ExecutorCancellation,
+) {
     let started = Instant::now();
     let request_id = prepared.request_id.clone();
     let adapter = match load_adapter(&context.adapter_config) {
@@ -257,10 +313,25 @@ async fn submit(context: ExecutionContext, prepared: PreparedJob, events: &Sende
             backend_job_id: backend_job_id.clone(),
         },
     );
-    match adapter
-        .wait_websocket(&prepared.client_id, &backend_job_id, BACKEND_WAIT_TIMEOUT)
-        .await
-    {
+    let backend_state = tokio::select! {
+        state = adapter.wait_websocket(
+            &prepared.client_id,
+            &backend_job_id,
+            BACKEND_WAIT_TIMEOUT,
+        ) => Some(state),
+        () = cancellation.wait(&context.job.job_id) => None,
+    };
+    let Some(backend_state) = backend_state else {
+        send_event(
+            events,
+            ExecutorEvent::Cancelled {
+                job_id: context.job.job_id,
+                request_id,
+            },
+        );
+        return;
+    };
+    match backend_state {
         Ok(BackendState::Succeeded) => {
             collect_output(
                 &adapter,
@@ -307,6 +378,7 @@ async fn reconcile(
     workflow_hash: String,
     backend_job_id: BackendJobId,
     events: &Sender<ExecutorEvent>,
+    cancellation: &ExecutorCancellation,
 ) {
     let started = Instant::now();
     let adapter = match load_adapter(&context.adapter_config) {
@@ -323,7 +395,21 @@ async fn reconcile(
             return;
         }
     };
-    match adapter.reconcile(&backend_job_id).await {
+    let backend_state = tokio::select! {
+        state = adapter.reconcile(&backend_job_id) => Some(state),
+        () = cancellation.wait(&context.job.job_id) => None,
+    };
+    let Some(backend_state) = backend_state else {
+        send_event(
+            events,
+            ExecutorEvent::Cancelled {
+                job_id: context.job.job_id,
+                request_id,
+            },
+        );
+        return;
+    };
+    match backend_state {
         Ok(BackendState::Succeeded) => {
             collect_output(
                 &adapter,
@@ -581,5 +667,20 @@ fn load_adapter(path: &Path) -> Result<ComfyAdapter, (String, String)> {
 fn send_event(events: &Sender<ExecutorEvent>, event: ExecutorEvent) {
     if events.send(event).is_err() {
         eprintln!("worker stopped before a camera event could be delivered");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancellation_signal_releases_waiter() {
+        let cancellation = ExecutorCancellation::default();
+        cancellation.request("JOB-test");
+
+        tokio::time::timeout(Duration::from_millis(100), cancellation.wait("JOB-test"))
+            .await
+            .unwrap();
     }
 }

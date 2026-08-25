@@ -10,11 +10,12 @@ use super::{
     write_json_atomic, write_text_atomic,
 };
 use crate::domain::{
-    Approval, ApprovalKind, AuthoringReceipt, BibleEntry, BibleIndex, ContractRecord,
+    Approval, ApprovalKind, AttemptState, AuthoringReceipt, BibleEntry, BibleIndex, ContractRecord,
     ContractStatus, JobJournal, JobState, ProjectManifest, ProjectStage, ProjectState,
     ScriptBundle, ShotRuntimeState, ShotStage, TakeMetadata,
 };
 
+mod builds;
 mod decisions;
 
 #[derive(Debug, Clone)]
@@ -262,6 +263,15 @@ impl ProjectStore {
                 job_id: shot.active_job_id.clone().unwrap_or_default(),
             });
         }
+        if let Some(build) = state
+            .builds
+            .values()
+            .find(|build| matches!(build.status.as_str(), "queued" | "running"))
+        {
+            return Err(StoreError::BuildBusy {
+                build_id: build.build_id.clone(),
+            });
+        }
         let approval = state
             .pending_approvals
             .iter()
@@ -280,6 +290,9 @@ impl ProjectStore {
             .active_contract_id
             .as_deref()
             .and_then(|id| self.read_contract_bundle(&state, id).ok());
+        let delivery_changed = previous_bundle
+            .as_ref()
+            .is_some_and(|previous| previous.project.delivery != bundle.project.delivery);
 
         let previous_shots: HashMap<_, _> = previous_bundle
             .as_ref()
@@ -325,6 +338,7 @@ impl ProjectStore {
                 take.stale = true;
             }
         }
+        self.mark_builds_stale_for_contract(&mut state, &changed_shots, delivery_changed);
         state.shots = next_shots;
 
         for (id, record) in &mut state.contracts {
@@ -386,6 +400,22 @@ impl ProjectStore {
         command_id: &str,
         now: &str,
     ) -> Result<ProjectState, StoreError> {
+        self.enqueue_job_with_audition_target(job, expected_revision, command_id, now, None)
+    }
+
+    pub fn enqueue_job_with_audition_target(
+        &self,
+        job: &JobJournal,
+        expected_revision: u64,
+        command_id: &str,
+        now: &str,
+        audition_target_takes: Option<u8>,
+    ) -> Result<ProjectState, StoreError> {
+        if audition_target_takes == Some(0) {
+            return Err(StoreError::InvalidJob(
+                "audition target must be greater than zero".to_owned(),
+            ));
+        }
         let _lock = self.lock()?;
         let mut state = self.read_state()?;
         if state.revision != expected_revision {
@@ -457,6 +487,7 @@ impl ProjectStore {
         write_json_atomic(&job_path, job)?;
         shot.stage = ShotStage::Queued;
         shot.active_job_id = Some(job.job_id.clone());
+        shot.audition_target_takes = audition_target_takes;
         shot.fail_codes.clear();
         state.last_command_id = Some(command_id.to_owned());
         state.bump_revision(now.to_owned())?;
@@ -498,6 +529,7 @@ impl ProjectStore {
         job.state = JobState::Cancelled;
         self.save_job(&job)?;
         shot.active_job_id = None;
+        shot.audition_target_takes = None;
         let has_available_candidates = shot
             .take_ids
             .iter()
@@ -513,6 +545,77 @@ impl ProjectStore {
         state.bump_revision(now.to_owned())?;
         self.save_state(&state, expected_revision)?;
         self.append_event("job_cancelled", job_id, command_id, now)?;
+        Ok(state)
+    }
+
+    pub fn cancel_running_job_after_interrupt(
+        &self,
+        job_id: &str,
+        expected_revision: u64,
+        command_id: &str,
+        now: &str,
+    ) -> Result<ProjectState, StoreError> {
+        let _lock = self.lock()?;
+        let mut state = self.read_state()?;
+        ensure_revision(&state, expected_revision)?;
+        let mut job = self.read_job(job_id)?;
+        if job.state != JobState::Active {
+            return Err(StoreError::JobNotCancellable {
+                job_id: job_id.to_owned(),
+                state: format!("{:?}", job.state).to_ascii_lowercase(),
+            });
+        }
+        let shot = state
+            .shots
+            .get(&job.shot_id)
+            .ok_or_else(|| StoreError::ShotNotFound(job.shot_id.clone()))?;
+        if shot.active_job_id.as_deref() != Some(job_id) {
+            return Err(StoreError::InvalidJob(format!(
+                "job `{job_id}` is not the active job for shot `{}`",
+                job.shot_id
+            )));
+        }
+        let attempt = job.attempts.last_mut().ok_or_else(|| {
+            StoreError::InvalidJob(format!("running job `{job_id}` has no active attempt"))
+        })?;
+        if attempt.backend_job_id.is_none()
+            || !matches!(
+                attempt.state,
+                AttemptState::Submitted | AttemptState::Running
+            )
+        {
+            return Err(StoreError::InvalidJob(format!(
+                "running job `{job_id}` has not reached an interruptible backend state"
+            )));
+        }
+        attempt.state = AttemptState::Cancelled;
+        attempt.error_code = Some("USER_CANCELLED".to_owned());
+        attempt.error_message = Some("ComfyUI confirmed global interrupt".to_owned());
+        attempt.updated_at = now.to_owned();
+        job.state = JobState::Cancelled;
+        self.save_job(&job)?;
+
+        let shot = state
+            .shots
+            .get_mut(&job.shot_id)
+            .ok_or_else(|| StoreError::ShotNotFound(job.shot_id.clone()))?;
+        shot.active_job_id = None;
+        shot.audition_target_takes = None;
+        let has_available_candidates = shot
+            .take_ids
+            .iter()
+            .any(|take_id| !shot.rejected_take_ids.contains(take_id));
+        shot.stage = if shot.selected_candidate_take_id.is_some() {
+            ShotStage::Selected
+        } else if has_available_candidates {
+            ShotStage::CandidatesReady
+        } else {
+            ShotStage::Pending
+        };
+        state.last_command_id = Some(command_id.to_owned());
+        state.bump_revision(now.to_owned())?;
+        self.save_state(&state, expected_revision)?;
+        self.append_event("running_job_interrupted", job_id, command_id, now)?;
         Ok(state)
     }
 
@@ -703,6 +806,7 @@ fn initial_shot_state(
         stage: ShotStage::Pending,
         risk,
         active_job_id: None,
+        audition_target_takes: None,
         selected_candidate_take_id: None,
         approved_take_id: None,
         take_ids: Vec::new(),

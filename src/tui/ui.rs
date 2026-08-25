@@ -417,7 +417,7 @@ fn render_builds<B: TuiBackend>(frame: &mut Frame<'_>, area: Rect, app: &App<B>)
             Row::new(vec![
                 Cell::from(build.build_id.clone()),
                 Cell::from(build.kind.clone()),
-                Cell::from(build.status.clone()),
+                Cell::from(build_status(build)),
                 Cell::from(build.recipe.clone()),
                 Cell::from(if build.warnings.is_empty() {
                     "none".to_owned()
@@ -446,6 +446,14 @@ fn render_builds<B: TuiBackend>(frame: &mut Frame<'_>, area: Rect, app: &App<B>)
     );
 }
 
+fn build_status(build: &BuildSummary) -> String {
+    if build.stale {
+        format!("{} (stale)", build.status)
+    } else {
+        build.status.clone()
+    }
+}
+
 fn build_details(build: Option<&BuildSummary>) -> Vec<Line<'static>> {
     let Some(build) = build else {
         return vec![
@@ -458,7 +466,9 @@ fn build_details(build: Option<&BuildSummary>) -> Vec<Line<'static>> {
         field("Kind", &build.kind),
         field("Status", &build.status),
         field("Recipe", &build.recipe),
+        field("Command ID", &build.command_id),
         field("Output", path_text(build.output_path.as_deref())),
+        field("Stale", if build.stale { "yes" } else { "no" }),
         field("Warnings", &list_text(&build.warnings)),
     ]
 }
@@ -900,6 +910,7 @@ mod tests {
                 media_path: Some("/projects/rain/review/S01/S01-T002-preview.mp4".into()),
             }],
             queue: QueueSummary {
+                revision: 3,
                 paused: false,
                 jobs: vec![],
             },
@@ -960,5 +971,16 @@ mod tests {
         assert!(output.contains("Confirm action"));
         assert!(output.contains("candidate_selection"));
         assert!(output.contains("y / Enter"));
+    }
+
+    #[test]
+    fn stale_build_status_is_explicit() {
+        let build = BuildSummary {
+            status: "needs_review".to_owned(),
+            stale: true,
+            ..BuildSummary::default()
+        };
+
+        assert_eq!(build_status(&build), "needs_review (stale)");
     }
 }

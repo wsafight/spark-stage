@@ -12,7 +12,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use ulid::Ulid;
 
-use crate::adapter::{ComfyAdapter, ComfyAdapterConfig};
+use crate::adapter::{CameraAdapter, CancelOutcome, ComfyAdapter, ComfyAdapterConfig};
+use crate::build::{BuildEvent, BuildExecutorHandle, BuildRecipe, BuildRequest};
 use crate::domain::{
     Approval, ApprovalKind, AttemptJournal, AttemptState, FailureRecord, JobJournal, JobState,
     Operation, ProjectOutcome, ProjectStage, ProjectState, PromotionStrategy, QualityTarget,
@@ -21,8 +22,8 @@ use crate::domain::{
 use crate::ipc::{
     AppSnapshot, ApprovalSummary, BudgetSummary, BuildSummary, ClientRequest, DiagnosticSummary,
     FailureSummary, GpuSummary, IPC_PROTOCOL_VERSION, ProjectSummary, QueueJobSummary,
-    QueueSummary, ShotSummary, TakeSummary, WorkerCommand, WorkerError, WorkerReply, read_frame,
-    write_frame,
+    QueueSummary, RevisionEvent, ShotSummary, TakeSummary, WorkerCommand, WorkerError, WorkerReply,
+    read_frame, write_frame,
 };
 use crate::paths::AppPaths;
 use crate::store::{
@@ -31,8 +32,12 @@ use crate::store::{
 };
 use crate::validation::validate_json;
 
-use super::executor::{ExecutionContext, ExecutorEvent, ExecutorHandle, ExecutorRequest};
+use super::executor::{
+    ExecutionContext, ExecutorCancellation, ExecutorEvent, ExecutorHandle, ExecutorRequest,
+};
 
+mod auditions;
+mod builds;
 mod commands;
 mod execution;
 mod snapshot;
@@ -67,26 +72,38 @@ pub fn run(options: WorkerOptions) -> Result<(), WorkerRunError> {
             source,
         })?;
     let executor = ExecutorHandle::spawn().map_err(WorkerRunError::Executor)?;
+    runtime.camera_cancellation = Some(executor.cancellation());
     let mut executor_busy = false;
     let mut dispatch_after = Instant::now();
+    let mut subscribers = Vec::new();
 
     loop {
+        if runtime.poll_build_events()? {
+            notify_subscribers(&runtime, &mut subscribers);
+        }
         loop {
             match executor.try_recv() {
                 Ok(event) => {
                     let finishes_request = event.finishes_request();
                     let retry_delay = event.retry_delay();
+                    let queue_revision = runtime.queue.revision;
                     match runtime.apply_executor_event(event) {
                         Ok(Some(request)) => {
                             executor.send(request).map_err(|error| {
                                 WorkerRunError::ExecutorChannel(error.to_string())
                             })?;
                             executor_busy = true;
+                            if runtime.queue.revision != queue_revision {
+                                notify_subscribers(&runtime, &mut subscribers);
+                            }
                         }
                         Ok(None) => {
                             if finishes_request {
                                 executor_busy = false;
                                 dispatch_after = Instant::now() + retry_delay;
+                            }
+                            if runtime.queue.revision != queue_revision {
+                                notify_subscribers(&runtime, &mut subscribers);
                             }
                         }
                         Err(error) => {
@@ -107,14 +124,22 @@ pub fn run(options: WorkerOptions) -> Result<(), WorkerRunError> {
             }
         }
         if !executor_busy && Instant::now() >= dispatch_after {
+            let queue_revision = runtime.queue.revision;
             match runtime.next_executor_request() {
                 Ok(Some(request)) => {
                     executor
                         .send(request)
                         .map_err(|error| WorkerRunError::ExecutorChannel(error.to_string()))?;
                     executor_busy = true;
+                    if runtime.queue.revision != queue_revision {
+                        notify_subscribers(&runtime, &mut subscribers);
+                    }
                 }
-                Ok(None) => {}
+                Ok(None) => {
+                    if runtime.queue.revision != queue_revision {
+                        notify_subscribers(&runtime, &mut subscribers);
+                    }
+                }
                 Err(error) => {
                     eprintln!("camera scheduling failed: {error}");
                     dispatch_after = Instant::now() + Duration::from_secs(5);
@@ -122,11 +147,11 @@ pub fn run(options: WorkerOptions) -> Result<(), WorkerRunError> {
             }
         }
         match listener.accept() {
-            Ok((mut stream, _)) => {
+            Ok((stream, _)) => {
                 let timeout = Some(Duration::from_secs(5));
                 let _ = stream.set_read_timeout(timeout);
                 let _ = stream.set_write_timeout(timeout);
-                if let Err(error) = serve_connection(&mut runtime, &mut stream) {
+                if let Err(error) = serve_connection(&mut runtime, stream, &mut subscribers) {
                     eprintln!("worker connection error: {error}");
                 }
             }
@@ -139,11 +164,65 @@ pub fn run(options: WorkerOptions) -> Result<(), WorkerRunError> {
 
 fn serve_connection(
     runtime: &mut WorkerRuntime,
-    stream: &mut UnixStream,
+    mut stream: UnixStream,
+    subscribers: &mut Vec<RevisionSubscriber>,
 ) -> Result<(), WorkerRunError> {
-    let request: ClientRequest = read_frame(stream).map_err(WorkerRunError::Frame)?;
+    let request: ClientRequest = read_frame(&mut stream).map_err(WorkerRunError::Frame)?;
+    let subscribing = matches!(&request.command, WorkerCommand::Subscribe { .. });
+    let mutating = request.command.is_mutating();
     let reply = runtime.handle(request);
-    write_frame(stream, &reply).map_err(WorkerRunError::Frame)
+    let committed_mutation = mutating && reply.ok;
+    write_frame(&mut stream, &reply).map_err(WorkerRunError::Frame)?;
+    if subscribing
+        && reply.ok
+        && let Some(snapshot) = reply.snapshot
+    {
+        let _ = stream.set_read_timeout(None);
+        let _ = stream.set_write_timeout(Some(Duration::from_millis(250)));
+        subscribers.push(RevisionSubscriber {
+            stream,
+            project_id: snapshot.project.id,
+            project_revision: snapshot.revision,
+            queue_revision: snapshot.queue.revision,
+        });
+    }
+    if committed_mutation {
+        notify_subscribers(runtime, subscribers);
+    }
+    Ok(())
+}
+
+struct RevisionSubscriber {
+    stream: UnixStream,
+    project_id: String,
+    project_revision: u64,
+    queue_revision: u64,
+}
+
+fn notify_subscribers(runtime: &WorkerRuntime, subscribers: &mut Vec<RevisionSubscriber>) {
+    subscribers.retain_mut(|subscriber| {
+        let Some(project_revision) = runtime.project_revision(Some(&subscriber.project_id)) else {
+            return false;
+        };
+        let queue_revision = runtime.queue.revision;
+        if project_revision == subscriber.project_revision
+            && queue_revision == subscriber.queue_revision
+        {
+            return true;
+        }
+        let event = RevisionEvent {
+            protocol_version: IPC_PROTOCOL_VERSION.to_owned(),
+            project_id: subscriber.project_id.clone(),
+            project_revision,
+            queue_revision,
+        };
+        if write_frame(&mut subscriber.stream, &event).is_err() {
+            return false;
+        }
+        subscriber.project_revision = project_revision;
+        subscriber.queue_revision = queue_revision;
+        true
+    });
 }
 
 fn prepare_socket(path: &Path) -> Result<(), WorkerRunError> {
@@ -179,6 +258,8 @@ pub struct WorkerRuntime {
     queue: QueueState,
     commands: HashMap<String, CommandJournalEvent>,
     adapter_config: Option<PathBuf>,
+    build_executor: BuildExecutorHandle,
+    camera_cancellation: Option<ExecutorCancellation>,
 }
 
 impl WorkerRuntime {
@@ -213,14 +294,19 @@ impl WorkerRuntime {
         for event in read_jsonl::<CommandJournalEvent>(&paths.command_journal())? {
             commands.insert(event.command_id.clone(), event);
         }
+        let build_executor = BuildExecutorHandle::spawn().map_err(WorkerRunError::BuildExecutor)?;
         let mut runtime = Self {
             paths,
             queue,
             commands,
             adapter_config,
+            build_executor,
+            camera_cancellation: None,
         };
         runtime.rebuild_queue_from_projects()?;
         runtime.recover_prepared_commands()?;
+        runtime.recover_builds()?;
+        runtime.resume_auditions()?;
         Ok(runtime)
     }
 
@@ -281,6 +367,16 @@ impl WorkerRuntime {
         Ok(())
     }
 
+    pub(super) fn touch_queue_revision(&mut self) -> Result<(), WorkerRunError> {
+        self.queue.revision = self
+            .queue
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| WorkerRunError::Recovery("queue revision overflow".to_owned()))?;
+        write_json_atomic(&self.paths.queue_file(), &self.queue)?;
+        Ok(())
+    }
+
     fn recover_terminal_jobs(&self, store: &ProjectStore) -> Result<(), WorkerRunError> {
         let mut state = store.read_state()?;
         let expected_revision = state.revision;
@@ -315,6 +411,7 @@ impl WorkerRuntime {
                     });
                     if let Some(shot) = state.shots.get_mut(&shot_id) {
                         shot.active_job_id = None;
+                        shot.audition_target_takes = None;
                         shot.stage = if job.state == JobState::Cancelled {
                             ShotStage::Pending
                         } else {
@@ -568,6 +665,11 @@ enum TakeMutation {
 
 fn register_candidate(state: &mut ProjectState, take: &TakeMetadata, shot_id: &str, now: &str) {
     state.takes.insert(take.take_id.clone(), take.clone());
+    let matching_profile_count = state
+        .takes
+        .values()
+        .filter(|candidate| candidate.shot_id == shot_id && candidate.profile == take.profile)
+        .count();
     let Some(shot) = state.shots.get_mut(shot_id) else {
         return;
     };
@@ -575,6 +677,12 @@ fn register_candidate(state: &mut ProjectState, take: &TakeMetadata, shot_id: &s
     shot.active_job_id = None;
     if !shot.take_ids.contains(&take.take_id) {
         shot.take_ids.push(take.take_id.clone());
+    }
+    if shot
+        .audition_target_takes
+        .is_some_and(|target| matching_profile_count >= usize::from(target))
+    {
+        shot.audition_target_takes = None;
     }
     let available_take_ids = shot
         .take_ids
@@ -683,6 +791,10 @@ pub enum WorkerRunError {
     Executor(#[source] std::io::Error),
     #[error("camera executor channel failed: {0}")]
     ExecutorChannel(String),
+    #[error("cannot start build executor: {0}")]
+    BuildExecutor(#[source] std::io::Error),
+    #[error("build executor channel failed: {0}")]
+    BuildExecutorChannel(String),
 }
 
 fn success(
@@ -758,7 +870,9 @@ fn store_failure(request: &ClientRequest, error: StoreError) -> WorkerReply {
         StoreError::LockBusy { .. } => {
             failure(request, "RESOURCE_BUSY", error.to_string(), true, None)
         }
-        StoreError::NoPendingScriptApproval | StoreError::ContractNotFound(_) => failure(
+        StoreError::NoPendingScriptApproval
+        | StoreError::ApprovalNotFound(_)
+        | StoreError::ContractNotFound(_) => failure(
             request,
             "APPROVAL_NOT_FOUND",
             error.to_string(),
@@ -777,6 +891,9 @@ fn store_failure(request: &ClientRequest, error: StoreError) -> WorkerReply {
         }
         StoreError::ShotBusy { .. } => {
             failure(request, "SHOT_BUSY", error.to_string(), false, None)
+        }
+        StoreError::BuildBusy { .. } => {
+            failure(request, "BUILD_BUSY", error.to_string(), false, None)
         }
         StoreError::InvalidJob(_) => {
             failure(request, "JOB_INVALID", error.to_string(), false, None)
@@ -871,6 +988,7 @@ const fn command_kind(command: &WorkerCommand) -> &'static str {
     match command {
         WorkerCommand::Health => "health",
         WorkerCommand::Snapshot => "snapshot",
+        WorkerCommand::Subscribe { .. } => "revision.subscribe",
         WorkerCommand::CreateProject { .. } => "project.create",
         WorkerCommand::ApplyScript { .. } => "script.apply",
         WorkerCommand::ApproveScript => "script.approve",
@@ -933,6 +1051,7 @@ const fn approval_kind(value: ApprovalKind) -> &'static str {
         ApprovalKind::ScriptBundle => "script_bundle",
         ApprovalKind::CandidateSelection => "candidate_selection",
         ApprovalKind::BudgetOverrun => "budget_overrun",
+        ApprovalKind::BuildReview => "build_review",
         ApprovalKind::FinalVisualReview => "final_visual_review",
     }
 }
@@ -957,5 +1076,7 @@ const fn risk(value: Risk) -> &'static str {
     }
 }
 
+#[cfg(test)]
+mod command_tests;
 #[cfg(test)]
 mod tests;

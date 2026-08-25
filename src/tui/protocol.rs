@@ -21,6 +21,10 @@ pub struct ClientRequest {
 pub enum WorkerCommand {
     Health,
     Snapshot,
+    Subscribe {
+        project_revision: u64,
+        queue_revision: u64,
+    },
     CreateProject {
         project_id: String,
         title: String,
@@ -64,6 +68,8 @@ pub enum WorkerCommand {
     },
     Build {
         kind: String,
+        #[serde(default)]
+        shot_ids: Vec<String>,
     },
     OpenBuild {
         build_id: String,
@@ -81,8 +87,10 @@ impl WorkerCommand {
             self,
             Self::Health
                 | Self::Snapshot
+                | Self::Subscribe { .. }
                 | Self::PreviewTake { .. }
                 | Self::OpenBuild { .. }
+                | Self::RetryProbe { .. }
                 | Self::OpenLogs
         )
     }
@@ -115,6 +123,15 @@ pub struct WorkerError {
     pub retryable: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_revision: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RevisionEvent {
+    pub protocol_version: String,
+    pub project_id: String,
+    pub project_revision: u64,
+    pub queue_revision: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -241,6 +258,8 @@ pub struct TakeSummary {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QueueSummary {
+    #[serde(default)]
+    pub revision: u64,
     pub paused: bool,
     #[serde(default)]
     pub jobs: Vec<QueueJobSummary>,
@@ -267,10 +286,13 @@ pub struct BuildSummary {
     pub kind: String,
     pub status: String,
     pub recipe: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub command_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_path: Option<PathBuf>,
     #[serde(default)]
     pub warnings: Vec<String>,
+    pub stale: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -282,4 +304,30 @@ pub struct DiagnosticSummary {
     pub summary: String,
     #[serde(default)]
     pub capabilities: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{QueueSummary, WorkerCommand};
+
+    #[test]
+    fn queue_summary_without_revision_defaults_to_zero() {
+        let summary: QueueSummary = serde_json::from_str(r#"{"paused":false,"jobs":[]}"#).unwrap();
+
+        assert_eq!(summary.revision, 0);
+    }
+
+    #[test]
+    fn legacy_full_build_command_defaults_to_all_shots() {
+        let command: WorkerCommand =
+            serde_json::from_str(r#"{"type":"build","payload":{"kind":"draft"}}"#).unwrap();
+
+        assert_eq!(
+            command,
+            WorkerCommand::Build {
+                kind: "draft".to_owned(),
+                shot_ids: Vec::new(),
+            }
+        );
+    }
 }

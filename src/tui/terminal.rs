@@ -2,6 +2,8 @@ use std::io::{self, IsTerminal, Stdout};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 use std::process::Command;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crossterm::cursor::{Hide, Show};
@@ -12,6 +14,8 @@ use crossterm::terminal::{
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use signal_hook::SigId;
+use signal_hook::consts::signal::{SIGINT, SIGTERM};
 use thiserror::Error;
 
 use super::TuiOptions;
@@ -54,14 +58,19 @@ pub fn run(options: TuiOptions) -> Result<(), TuiError> {
 
 fn run_inner(options: TuiOptions) -> Result<(), TuiError> {
     let backend = UnixBackend::new(options.socket, options.project_id);
+    let revision_subscription = backend.subscribe();
     let mut app = App::new(backend, options.refresh_interval);
     app.initial_refresh();
 
     let mut session = TerminalSession::enter()?;
+    let termination = TerminationSignals::install()?;
     let mut next_frame = Instant::now();
 
-    while !app.should_quit {
+    while !app.should_quit && !termination.requested() {
         let now = Instant::now();
+        if revision_subscription.changed() {
+            app.refresh_now();
+        }
         app.tick(now);
 
         if now >= next_frame {
@@ -89,6 +98,41 @@ fn run_inner(options: TuiOptions) -> Result<(), TuiError> {
 
     session.restore()?;
     Ok(())
+}
+
+struct TerminationSignals {
+    requested: Arc<AtomicBool>,
+    registrations: Vec<SigId>,
+}
+
+impl TerminationSignals {
+    fn install() -> io::Result<Self> {
+        let requested = Arc::new(AtomicBool::new(false));
+        let interrupt = signal_hook::flag::register(SIGINT, requested.clone())?;
+        let terminate = match signal_hook::flag::register(SIGTERM, requested.clone()) {
+            Ok(terminate) => terminate,
+            Err(error) => {
+                signal_hook::low_level::unregister(interrupt);
+                return Err(error);
+            }
+        };
+        Ok(Self {
+            requested,
+            registrations: vec![interrupt, terminate],
+        })
+    }
+
+    fn requested(&self) -> bool {
+        self.requested.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for TerminationSignals {
+    fn drop(&mut self) {
+        for registration in self.registrations.drain(..) {
+            signal_hook::low_level::unregister(registration);
+        }
+    }
 }
 
 struct TerminalSession {
@@ -234,5 +278,18 @@ mod tests {
 
         assert!(debug.contains("player --unsafe-option"));
         assert!(debug.contains("take with spaces.mp4"));
+    }
+
+    #[test]
+    fn termination_flag_is_observable() {
+        let requested = Arc::new(AtomicBool::new(false));
+        let signals = TerminationSignals {
+            requested: requested.clone(),
+            registrations: Vec::new(),
+        };
+
+        requested.store(true, Ordering::Relaxed);
+
+        assert!(signals.requested());
     }
 }

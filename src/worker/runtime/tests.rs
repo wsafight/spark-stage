@@ -1,5 +1,8 @@
 use super::*;
 
+mod cancellation;
+mod recovery;
+
 const BUNDLE: &str = include_str!("../../../skills/screenwriter/examples/valid-short-drama.json");
 
 fn request(
@@ -21,6 +24,53 @@ fn runtime() -> (tempfile::TempDir, WorkerRuntime) {
     let paths = AppPaths::resolve(Some(directory.path().join("data")), None);
     let runtime = WorkerRuntime::open(paths).unwrap();
     (directory, runtime)
+}
+
+#[test]
+fn revision_subscription_reports_queue_only_changes() {
+    let (_directory, mut runtime) = runtime();
+    assert!(
+        runtime
+            .handle(request(
+                None,
+                None,
+                WorkerCommand::CreateProject {
+                    project_id: "demo".to_owned(),
+                    title: "Demo".to_owned(),
+                    brief: "Brief".to_owned(),
+                },
+            ))
+            .ok
+    );
+    let (mut client, server) = UnixStream::pair().unwrap();
+    let subscribe = request(
+        Some("demo"),
+        None,
+        WorkerCommand::Subscribe {
+            project_revision: 1,
+            queue_revision: 1,
+        },
+    );
+    write_frame(&mut client, &subscribe).unwrap();
+    let mut subscribers = Vec::new();
+    serve_connection(&mut runtime, server, &mut subscribers).unwrap();
+    let ack: WorkerReply = read_frame(&mut client).unwrap();
+    assert!(ack.ok);
+    assert_eq!(subscribers.len(), 1);
+
+    let (mut command_client, command_server) = UnixStream::pair().unwrap();
+    write_frame(
+        &mut command_client,
+        &request(Some("demo"), Some(1), WorkerCommand::PauseQueue),
+    )
+    .unwrap();
+    serve_connection(&mut runtime, command_server, &mut subscribers).unwrap();
+    let paused: WorkerReply = read_frame(&mut command_client).unwrap();
+    assert!(paused.ok, "{paused:?}");
+
+    let event: RevisionEvent = read_frame(&mut client).unwrap();
+    assert_eq!(event.project_revision, 1);
+    assert_eq!(event.queue_revision, 2);
 }
 
 #[test]
@@ -102,75 +152,6 @@ fn stale_mutation_returns_current_revision() {
     assert!(!reply.ok);
     assert_eq!(reply.revision, Some(1));
     assert_eq!(reply.error.unwrap().code, "REVISION_CONFLICT");
-}
-
-#[test]
-fn startup_recovers_prepared_command_when_project_state_was_written() {
-    let directory = tempfile::tempdir().unwrap();
-    let paths = AppPaths::resolve(Some(directory.path().join("data")), None);
-    fs::create_dir_all(&paths.runtime_dir).unwrap();
-    write_json_atomic(&paths.queue_file(), &QueueState::default()).unwrap();
-
-    let create = request(
-        None,
-        None,
-        WorkerCommand::CreateProject {
-            project_id: "demo".to_owned(),
-            title: "Demo".to_owned(),
-            brief: "Brief".to_owned(),
-        },
-    );
-    ProjectStore::create(
-        &paths.projects_dir,
-        "demo",
-        "Demo",
-        "Brief",
-        &create.command_id,
-        "100",
-    )
-    .unwrap();
-    append_prepared(&paths, &create);
-
-    let mut recovered = WorkerRuntime::open(paths).unwrap();
-    let reply = recovered.handle(create);
-
-    assert!(reply.ok, "{reply:?}");
-    assert_eq!(reply.revision, Some(1));
-    assert!(reply.message.unwrap().contains("recovered committed"));
-}
-
-#[test]
-fn startup_aborts_prepared_command_when_state_was_not_written() {
-    let directory = tempfile::tempdir().unwrap();
-    let paths = AppPaths::resolve(Some(directory.path().join("data")), None);
-    let mut initial = WorkerRuntime::open(paths.clone()).unwrap();
-    let create = request(
-        None,
-        None,
-        WorkerCommand::CreateProject {
-            project_id: "demo".to_owned(),
-            title: "Demo".to_owned(),
-            brief: "Brief".to_owned(),
-        },
-    );
-    assert!(initial.handle(create).ok);
-    drop(initial);
-
-    let apply = request(
-        Some("demo"),
-        Some(1),
-        WorkerCommand::ApplyScript {
-            bundle_json: BUNDLE.to_owned(),
-        },
-    );
-    append_prepared(&paths, &apply);
-
-    let mut recovered = WorkerRuntime::open(paths).unwrap();
-    let reply = recovered.handle(apply);
-
-    assert!(!reply.ok);
-    assert_eq!(reply.error.unwrap().code, "COMMAND_ABORTED_BEFORE_COMMIT");
-    assert_eq!(reply.revision, Some(1));
 }
 
 #[test]
@@ -292,6 +273,60 @@ verified_operations: [t2v]
     )
     .unwrap();
     config
+}
+
+fn interrupting_adapter(directory: &Path) -> (PathBuf, std::sync::mpsc::Receiver<String>) {
+    use std::io::{Read as _, Write as _};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let config = verified_adapter(directory);
+    let source = fs::read_to_string(&config)
+        .unwrap()
+        .replace(
+            "endpoint: http://127.0.0.1:8188",
+            &format!("endpoint: http://{address}"),
+        )
+        .replace(
+            "enabled: true",
+            "enabled: true\nallow_global_interrupt: true",
+        );
+    fs::write(&config, source).unwrap();
+    let (request_tx, request_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        loop {
+            let read = stream.read(&mut buffer).unwrap();
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+        request_tx
+            .send(String::from_utf8_lossy(&request).into_owned())
+            .unwrap();
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .unwrap();
+    });
+    (config, request_rx)
+}
+
+fn mark_backend_submitted(paths: &AppPaths, job_id: &str) {
+    let store = ProjectStore::open(&paths.projects_dir, "rain-apartment").unwrap();
+    let mut job = store.read_job(job_id).unwrap();
+    let attempt = job.attempts.last_mut().unwrap();
+    attempt.state = AttemptState::Submitted;
+    attempt.backend_job_id = Some("backend-1".to_owned());
+    store.save_job(&job).unwrap();
 }
 
 fn approved_project(runtime: &mut WorkerRuntime) {
@@ -656,6 +691,41 @@ fn completed_candidate_creates_blocking_selection_approval() {
 }
 
 #[test]
+fn audition_target_stops_after_configured_candidate_count() {
+    let directory = tempfile::tempdir().unwrap();
+    let paths = AppPaths::resolve(Some(directory.path().join("data")), None);
+    let mut runtime = WorkerRuntime::open(paths.clone()).unwrap();
+    approved_project(&mut runtime);
+    let first_take_id = seed_candidate(
+        &paths,
+        false,
+        ShotStage::CandidatesReady,
+        PathBuf::from("raw/S01/candidate-1.mp4"),
+    );
+    let store = ProjectStore::open(&paths.projects_dir, "rain-apartment").unwrap();
+    let mut state = store.read_state().unwrap();
+    state.shots.get_mut("S01").unwrap().audition_target_takes = Some(2);
+    let first = state.takes[&first_take_id].clone();
+
+    register_candidate(&mut state, &first, "S01", "101");
+    assert_eq!(state.shots["S01"].audition_target_takes, Some(2));
+
+    let mut second = first;
+    second.take_id = "TAKE-00000000000000000000000001".to_owned();
+    second.job_id = "JOB-00000000000000000000000001".to_owned();
+    second.media_path = PathBuf::from("raw/S01/candidate-2.mp4");
+    register_candidate(&mut state, &second, "S01", "102");
+
+    assert_eq!(state.shots["S01"].audition_target_takes, None);
+    let approval = state
+        .pending_approvals
+        .iter()
+        .find(|approval| approval.kind == ApprovalKind::CandidateSelection)
+        .unwrap();
+    assert_eq!(approval.take_ids.len(), 2);
+}
+
+#[test]
 fn candidate_approval_allows_more_auditions_and_does_not_freeze_other_shots() {
     for command in [
         WorkerCommand::AuditionShot {
@@ -743,6 +813,29 @@ fn executor_events_persist_attempt_and_complete_candidate() {
         AttemptState::Submitting
     );
 
+    let project_revision = store.read_state().unwrap().revision;
+    let queue_revision = runtime.queue.revision;
+    let (mut subscriber_client, subscriber_server) = UnixStream::pair().unwrap();
+    subscriber_client
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    write_frame(
+        &mut subscriber_client,
+        &request(
+            Some("rain-apartment"),
+            None,
+            WorkerCommand::Subscribe {
+                project_revision,
+                queue_revision,
+            },
+        ),
+    )
+    .unwrap();
+    let mut subscribers = Vec::new();
+    serve_connection(&mut runtime, subscriber_server, &mut subscribers).unwrap();
+    let acknowledgement: WorkerReply = read_frame(&mut subscriber_client).unwrap();
+    assert!(acknowledgement.ok, "{acknowledgement:?}");
+
     runtime
         .apply_executor_event(ExecutorEvent::Submitted {
             job_id: job_id.clone(),
@@ -750,6 +843,11 @@ fn executor_events_persist_attempt_and_complete_candidate() {
             backend_job_id: crate::adapter::BackendJobId("backend-1".to_owned()),
         })
         .unwrap();
+    assert_eq!(runtime.queue.revision, queue_revision + 1);
+    notify_subscribers(&runtime, &mut subscribers);
+    let revision_event: RevisionEvent = read_frame(&mut subscriber_client).unwrap();
+    assert_eq!(revision_event.project_revision, project_revision);
+    assert_eq!(revision_event.queue_revision, queue_revision + 1);
     let submitted = store.read_job(&job_id).unwrap();
     assert_eq!(submitted.attempts[0].state, AttemptState::Submitted);
     assert_eq!(
@@ -817,12 +915,14 @@ fn executor_events_persist_attempt_and_complete_candidate() {
     let state = store.read_state().unwrap();
     let take_id = &completed.reserved_take_id;
     assert!(state.takes.contains_key(take_id));
-    assert_eq!(state.shots["S01"].stage, ShotStage::CandidatesReady);
-    assert!(state.shots["S01"].active_job_id.is_none());
+    assert_eq!(state.shots["S01"].stage, ShotStage::Queued);
+    assert!(state.shots["S01"].active_job_id.is_some());
+    assert_eq!(state.shots["S01"].audition_target_takes, Some(3));
     assert!(state.pending_approvals.iter().any(|approval| {
         approval.kind == ApprovalKind::CandidateSelection && approval.take_ids.contains(take_id)
     }));
     assert!(runtime.queue.running.is_none());
+    assert_eq!(runtime.queue.pending.len(), 1);
 }
 
 #[test]
@@ -867,7 +967,7 @@ fn submission_unknown_blocks_gpu_dispatch_without_resubmitting() {
 }
 
 #[test]
-fn startup_recovers_completed_job_before_project_state_commit() {
+fn startup_recovers_completed_job_and_resumes_audition_batch() {
     let directory = tempfile::tempdir().unwrap();
     let paths = AppPaths::resolve(Some(directory.path().join("data")), None);
     let adapter = verified_adapter(directory.path());
@@ -916,14 +1016,15 @@ fn startup_recovers_completed_job_before_project_state_commit() {
     let recovered = WorkerRuntime::open_with_adapter(paths, Some(adapter)).unwrap();
 
     let state = store.read_state().unwrap();
-    assert!(state.shots["S01"].active_job_id.is_none());
+    assert!(state.shots["S01"].active_job_id.is_some());
+    assert_eq!(state.shots["S01"].stage, ShotStage::Queued);
     assert!(state.takes.contains_key(&take.take_id));
     assert!(state.pending_approvals.iter().any(|approval| {
         approval.kind == ApprovalKind::CandidateSelection
             && approval.take_ids.contains(&take.take_id)
     }));
     assert!(recovered.queue.running.is_none());
-    assert!(recovered.queue.pending.is_empty());
+    assert_eq!(recovered.queue.pending.len(), 1);
 }
 
 #[test]
@@ -956,67 +1057,4 @@ fn adapter_fingerprint_change_is_persisted_as_dispatch_block() {
         Some("DISPATCH_BLOCKED")
     );
     assert!(runtime.next_executor_request().unwrap().is_none());
-}
-
-#[test]
-fn pending_job_can_be_cancelled_and_shot_returns_to_pending() {
-    let directory = tempfile::tempdir().unwrap();
-    let paths = AppPaths::resolve(Some(directory.path().join("data")), None);
-    let adapter = verified_adapter(directory.path());
-    let mut runtime = WorkerRuntime::open_with_adapter(paths.clone(), Some(adapter)).unwrap();
-    approved_project(&mut runtime);
-    let queued = runtime.handle(request(
-        Some("rain-apartment"),
-        Some(3),
-        WorkerCommand::AuditionShot {
-            shot_id: "S01".to_owned(),
-        },
-    ));
-    let job_id = queued.snapshot.unwrap().queue.jobs[0].job_id.clone();
-
-    let reply = runtime.handle(request(
-        Some("rain-apartment"),
-        Some(4),
-        WorkerCommand::CancelJob {
-            job_id: job_id.clone(),
-        },
-    ));
-
-    assert!(reply.ok, "{reply:?}");
-    let snapshot = reply.snapshot.unwrap();
-    assert!(snapshot.queue.jobs.is_empty());
-    assert_eq!(snapshot.shots[0].stage, "pending");
-    let store = ProjectStore::open(&paths.projects_dir, "rain-apartment").unwrap();
-    assert_eq!(store.read_job(&job_id).unwrap().state, JobState::Cancelled);
-}
-
-#[test]
-fn running_job_is_not_marked_cancelled_without_backend_interrupt() {
-    let directory = tempfile::tempdir().unwrap();
-    let paths = AppPaths::resolve(Some(directory.path().join("data")), None);
-    let adapter = verified_adapter(directory.path());
-    let mut runtime = WorkerRuntime::open_with_adapter(paths.clone(), Some(adapter)).unwrap();
-    approved_project(&mut runtime);
-    let queued = runtime.handle(request(
-        Some("rain-apartment"),
-        Some(3),
-        WorkerCommand::AuditionShot {
-            shot_id: "S01".to_owned(),
-        },
-    ));
-    let job_id = queued.snapshot.unwrap().queue.jobs[0].job_id.clone();
-    let _request = runtime.next_executor_request().unwrap().unwrap();
-
-    let reply = runtime.handle(request(
-        Some("rain-apartment"),
-        Some(5),
-        WorkerCommand::CancelJob {
-            job_id: job_id.clone(),
-        },
-    ));
-
-    assert!(!reply.ok);
-    assert_eq!(reply.error.unwrap().code, "JOB_ALREADY_RUNNING");
-    let store = ProjectStore::open(&paths.projects_dir, "rain-apartment").unwrap();
-    assert_eq!(store.read_job(&job_id).unwrap().state, JobState::Active);
 }

@@ -326,6 +326,12 @@ Take 是已发生生成的不可变证据。只有输出通过路径检查、文
 
 全局 `queue.json` 至少包含：schema、revision、paused、running job 引用和 pending job 引用。它不复制完整 shot 或 prompt；worker 从项目 job journal 读取执行输入。
 
+### 8.7 BuildRecord
+
+Build 使用独立于 GPU camera queue 的单执行器，状态为 `queued -> running -> needs_review -> approved`；执行、媒体硬检查或恢复失败进入 `failed`。`queued` 表示配方与状态已经持久化但 ffmpeg 尚未取走任务，`running` 只在执行线程发出 started 事件后写入，因此 TUI 能区分等待与实际封装。
+
+每条记录保存原始 command id、recipe 路径、输出路径、警告和 stale 标记。不可变 recipe 固化合同 hash、源 revision，以及每个输入 take 的 profile、input hash、adapter / workflow / model 指纹和 seed。`edit build --kind draft --shots S04-S07,S10` 在 CLI 展开为显式 shot ID，worker 校验重复和未知 ID，再按合同顺序写入 recipe；省略 `--shots` 才表示全片。局部范围只允许 draft，final 与 trailer 必须覆盖完整合同，避免片段通过终片审批后把项目错误标为 done。Build 配方要求每个 take 已有安全的项目内首帧路径，缺失或越界时必须在启动 FFmpeg 前失败。成片通过 ffprobe 与黑帧、静帧、静音硬检查后，才发布交付副本，并生成 `builds/<build-id>/contact-sheet.jpg`、`review/contact-sheet.jpg` 和包含完整配方血缘的 `review-report.json`；随后进入人工 build review，final build 仍必须经过 `final_visual_review` 才能升为 `playable + done`。当 take 决策或合同变化使 build stale 时，对应的待审批项同时撤销，旧产物仍保留但不能获批。worker 重启会恢复 `queued` 与 `running` build；缺失、损坏或身份不匹配的 recipe 只将对应 build 标为 `failed`，不能阻止其它项目启动。
+
 ## 9. 唯一写入与落盘协议
 
 ### 9.1 单 worker
@@ -460,6 +466,8 @@ trait CameraAdapter {
 schema_version: "1.0"
 adapter: minimax-h3-comfy
 endpoint: http://127.0.0.1:8188
+allow_remote: false
+allow_global_interrupt: false
 workflow: workflows/minimax-h3-api.json
 output_node: "120"
 bindings:
@@ -507,7 +515,7 @@ preflight 校验 workflow 文件 hash、节点存在、input 名、输出节点�
 
 优先级为 interactive、normal、background，同级 FIFO。正在运行的 job 不抢占。默认最多连续运行 3 个 interactive job；之后若 normal 已等待则让出一次。background 通过等待时间提升有效优先级，避免永久饥饿。所有数字放进配置并由基准测试校准。
 
-暂停只阻止新 job 开始。取消 running job 必须显示影响范围；若后端只能全局 interrupt，则只有确认当前唯一 GPU job 与目标一致时才能调用。
+暂停只阻止新 job 开始。pending job 可以直接取消；running job 只有在 attempt 已持久化 backend job id、目标确为全局队列中唯一的 GPU job，并且 adapter 明确配置 `allow_global_interrupt: true` 时才调用 ComfyUI `/interrupt`。后端返回成功前不得把本地 job 标为 cancelled；返回后先持久化 `attempt=cancelled`、`job=cancelled` 与 shot 状态，再通知相机执行线程退出 WebSocket / reconcile 等待。未到可中断阶段返回 `JOB_CANCEL_NOT_READY`，未显式启用返回 `JOB_CANCEL_UNSUPPORTED`，HTTP 失败返回可重试的 `JOB_CANCEL_FAILED`，三者都保持原运行状态。
 
 `sparkstage benchmark h3` 是 worker 的受控命令，不是第二套 ComfyUI 客户端。它先等待当前 GPU job 到达安全边界，再取得 benchmark reservation；未获锁时不能清理、终止或覆盖其它项目任务。benchmark 调用生产 adapter 的 prepare / submit / reconcile / fetch 路径，只在外围增加 profiler、遥测和实验报告。
 
@@ -604,7 +612,8 @@ TUI 是同一命令面的高密度控制台，适合本机终端和 SSH。它不
 ### 18.3 数据流
 
 - 初次进入通过 IPC 获取完整 snapshot 和 revision。
-- worker 通过本机事件订阅推送 revision 与摘要；断线后指数退避重连。
+- worker 仅在成功写命令、camera attempt / queue 状态迁移或 build 状态迁移后，通过本机长连接推送 project revision 与 queue revision；空闲循环不扫描项目文件。
+- 订阅断线后短退避重连；独立的 1 秒 snapshot 轮询保留为断线和漏通知兜底。
 - TUI 收到新 revision 后拉取新快照，不自行合并领域状态。
 - 所有变更动作携带 command id 和 expected revision。
 - `REVISION_CONFLICT` 时刷新并保持用户当前位置，不自动重复审批。
@@ -740,6 +749,12 @@ Ratatui 与 Crossterm 的精确版本由第一次 aarch64 编译验证后锁定�
 - 故障注入
 - 3 部 / 30 镜产品验证
 - 决定是否进入 v1 审片页和自动语义检查
+
+### 23.1 当前实现边界
+
+截至 2026-08-25，本地代码与无 GPU 测试已覆盖项目存储、worker IPC、文案合同批准、队列暂停/恢复/取消、候选与 take 决策、自动 audition 批次、build 执行与恢复、stale 传播、人工终片 gate、联系表命令构造、CLI/TUI 控制面，以及通过本地 mock 验证的 ComfyUI 全局 interrupt 协议。这里的“已覆盖”表示控制逻辑、状态转换和错误路径可测试，不表示 MiniMax H3 workflow 或 DGX Spark 性能已经验证。
+
+仍需在 DGX Spark 完成：导出并绑定真实 H3 API workflow，确认 prompt、seed、输出、模型指纹和原生音轨，实测 T2V 与任何 I2V / FLF2V / R2V 能力，验证完整 FFmpeg build 与联系表产物，以及记录 audition/final 的冷启动、稳态耗时、显存和质量基线。在这些结果落盘前，相关 capability 必须保持未验证或禁用。
 
 ## 24. 开工前仍需实测的事实
 

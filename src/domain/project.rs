@@ -314,6 +314,7 @@ pub enum ApprovalKind {
     ScriptBundle,
     CandidateSelection,
     BudgetOverrun,
+    BuildReview,
     FinalVisualReview,
 }
 
@@ -354,6 +355,8 @@ pub struct ShotRuntimeState {
     pub risk: Risk,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_job_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audition_target_takes: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_candidate_take_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -515,6 +518,8 @@ pub struct BuildRecord {
     pub kind: String,
     pub status: String,
     pub recipe: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub command_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_path: Option<PathBuf>,
     #[serde(default)]
@@ -656,6 +661,7 @@ mod tests {
                 stage: ShotStage::CandidatesReady,
                 risk: Risk::Low,
                 active_job_id: None,
+                audition_target_takes: None,
                 selected_candidate_take_id: None,
                 approved_take_id: None,
                 take_ids: vec!["TAKE-missing".to_owned()],

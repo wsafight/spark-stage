@@ -42,6 +42,8 @@ pub enum StoreError {
     LockBusy { path: PathBuf },
     #[error("script bundle has no pending approval")]
     NoPendingScriptApproval,
+    #[error("approval `{0}` does not exist")]
+    ApprovalNotFound(String),
     #[error("contract `{0}` is missing")]
     ContractNotFound(String),
     #[error("project has no active script contract")]
@@ -50,6 +52,8 @@ pub enum StoreError {
     ShotNotFound(String),
     #[error("shot `{shot_id}` already has active job `{job_id}`")]
     ShotBusy { shot_id: String, job_id: String },
+    #[error("build `{build_id}` is running")]
+    BuildBusy { build_id: String },
     #[error("job journal is invalid: {0}")]
     InvalidJob(String),
     #[error("job `{job_id}` is `{state}` and cannot be cancelled from the pending queue")]

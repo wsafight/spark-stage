@@ -53,11 +53,13 @@ impl ProjectStore {
             return Err(StoreError::TakeRejected(take_id.to_owned()));
         }
         shot.selected_candidate_take_id = Some(take_id.to_owned());
+        shot.audition_target_takes = None;
         shot.stage = ShotStage::Selected;
         state.pending_approvals.retain(|approval| {
             approval.kind != ApprovalKind::CandidateSelection
                 || approval.shot_id.as_deref() != Some(shot_id)
         });
+        self.mark_builds_stale_for_decision(&mut state, shot_id, Some(take_id));
         state.last_command_id = Some(command_id.to_owned());
         state.bump_revision(now.to_owned())?;
         self.save_state(&state, expected_revision)?;
@@ -120,11 +122,13 @@ impl ProjectStore {
             return Err(StoreError::TakeNotSelected(take_id.to_owned()));
         }
         shot.approved_take_id = Some(take_id.to_owned());
+        shot.audition_target_takes = None;
         shot.stage = ShotStage::Approved;
         state.pending_approvals.retain(|approval| {
             approval.kind != ApprovalKind::CandidateSelection
                 || approval.shot_id.as_deref() != Some(shot_id)
         });
+        self.mark_builds_stale_for_decision(&mut state, shot_id, Some(take_id));
         state.last_command_id = Some(command_id.to_owned());
         state.bump_revision(now.to_owned())?;
         self.save_state(&state, expected_revision)?;
@@ -190,6 +194,7 @@ impl ProjectStore {
         if shot.approved_take_id.as_deref() == Some(take_id) {
             shot.approved_take_id = None;
         }
+        shot.audition_target_takes = None;
         let all_rejected = shot
             .take_ids
             .iter()
@@ -211,6 +216,8 @@ impl ProjectStore {
                 || approval.shot_id.as_deref() != Some(shot_id)
                 || !approval.take_ids.is_empty()
         });
+        let current_take_id = state.shots[shot_id].selected_candidate_take_id.clone();
+        self.mark_builds_stale_for_decision(&mut state, shot_id, current_take_id.as_deref());
         state.last_command_id = Some(command_id.to_owned());
         state.bump_revision(now.to_owned())?;
         self.save_state(&state, expected_revision)?;

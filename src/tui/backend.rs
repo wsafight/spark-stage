@@ -1,7 +1,18 @@
+use std::net::Shutdown;
+use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, sync_channel};
+use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 pub use crate::ipc::ClientError as BackendError;
-use crate::ipc::WorkerClient;
+use crate::ipc::{
+    ClientRequest, IPC_PROTOCOL_VERSION, RevisionEvent, WorkerClient, WorkerReply, read_frame,
+    write_frame,
+};
+use ulid::Ulid;
 
 use super::protocol::{AppSnapshot, WorkerCommand};
 
@@ -33,6 +44,170 @@ impl UnixBackend {
             client: WorkerClient::new(socket, project_id),
         }
     }
+
+    pub fn subscribe(&self) -> RevisionSubscription {
+        RevisionSubscription::spawn(
+            self.client.socket().to_owned(),
+            self.client.project_id().map(str::to_owned),
+        )
+    }
+}
+
+pub struct RevisionSubscription {
+    changes: Receiver<()>,
+    stop: Arc<AtomicBool>,
+    connection: Arc<Mutex<Option<UnixStream>>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl RevisionSubscription {
+    fn spawn(socket: PathBuf, project_id: Option<String>) -> Self {
+        let (change_tx, changes) = sync_channel(1);
+        let stop = Arc::new(AtomicBool::new(false));
+        let connection = Arc::new(Mutex::new(None));
+        let thread_stop = stop.clone();
+        let thread_connection = connection.clone();
+        let thread = thread::Builder::new()
+            .name("sparkstage-revisions".to_owned())
+            .spawn(move || {
+                revision_subscription_loop(
+                    &socket,
+                    project_id.as_deref(),
+                    &change_tx,
+                    &thread_stop,
+                    &thread_connection,
+                );
+            })
+            .ok();
+        Self {
+            changes,
+            stop,
+            connection,
+            thread,
+        }
+    }
+
+    pub fn changed(&self) -> bool {
+        let mut changed = false;
+        loop {
+            match self.changes.try_recv() {
+                Ok(()) => changed = true,
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => return changed,
+            }
+        }
+    }
+}
+
+impl Drop for RevisionSubscription {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(stream) = self
+            .connection
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        {
+            let _ = stream.shutdown(Shutdown::Both);
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+fn revision_subscription_loop(
+    socket: &std::path::Path,
+    project_id: Option<&str>,
+    changes: &SyncSender<()>,
+    stop: &AtomicBool,
+    connection: &Mutex<Option<UnixStream>>,
+) {
+    let mut project_revision = 0;
+    let mut queue_revision = 0;
+    while !stop.load(Ordering::Relaxed) {
+        let mut stream = match UnixStream::connect(socket) {
+            Ok(stream) => stream,
+            Err(_) => {
+                thread::sleep(Duration::from_millis(250));
+                continue;
+            }
+        };
+        let timeout = Some(Duration::from_secs(3));
+        let _ = stream.set_read_timeout(timeout);
+        let _ = stream.set_write_timeout(timeout);
+        if let Ok(control) = stream.try_clone() {
+            *connection
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(control);
+        }
+        let command_id = Ulid::new().to_string();
+        let request = ClientRequest {
+            protocol_version: IPC_PROTOCOL_VERSION.to_owned(),
+            command_id: command_id.clone(),
+            expected_revision: None,
+            project_id: project_id.map(str::to_owned),
+            command: WorkerCommand::Subscribe {
+                project_revision,
+                queue_revision,
+            },
+        };
+        if write_frame(&mut stream, &request).is_err() {
+            clear_subscription_connection(connection);
+            thread::sleep(Duration::from_millis(250));
+            continue;
+        }
+        let ack: WorkerReply = match read_frame::<_, WorkerReply>(&mut stream) {
+            Ok(reply)
+                if reply.ok
+                    && reply.protocol_version == IPC_PROTOCOL_VERSION
+                    && reply.command_id == command_id =>
+            {
+                reply
+            }
+            _ => {
+                clear_subscription_connection(connection);
+                thread::sleep(Duration::from_millis(250));
+                continue;
+            }
+        };
+        let Some(snapshot) = ack.snapshot else {
+            clear_subscription_connection(connection);
+            thread::sleep(Duration::from_millis(250));
+            continue;
+        };
+        if snapshot.revision != project_revision || snapshot.queue.revision != queue_revision {
+            project_revision = snapshot.revision;
+            queue_revision = snapshot.queue.revision;
+            let _ = changes.try_send(());
+        }
+        let _ = stream.set_read_timeout(None);
+        loop {
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            let event: RevisionEvent = match read_frame::<_, RevisionEvent>(&mut stream) {
+                Ok(event) if event.protocol_version == IPC_PROTOCOL_VERSION => event,
+                _ => break,
+            };
+            if event.project_revision != project_revision || event.queue_revision != queue_revision
+            {
+                project_revision = event.project_revision;
+                queue_revision = event.queue_revision;
+                let _ = changes.try_send(());
+            }
+        }
+        clear_subscription_connection(connection);
+        if !stop.load(Ordering::Relaxed) {
+            thread::sleep(Duration::from_millis(250));
+        }
+    }
+}
+
+fn clear_subscription_connection(connection: &Mutex<Option<UnixStream>>) {
+    connection
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take();
 }
 
 impl TuiBackend for UnixBackend {
@@ -81,6 +256,10 @@ mod tests {
                 outcome: "needs_review".to_owned(),
                 work_mode: "director".to_owned(),
                 quality_target: "playable".to_owned(),
+            },
+            queue: crate::ipc::QueueSummary {
+                revision: 7,
+                ..crate::ipc::QueueSummary::default()
             },
             ..AppSnapshot::default()
         }
@@ -171,6 +350,45 @@ mod tests {
             request.command,
             WorkerCommand::RetryShot {
                 shot_id: "S01".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn revision_subscription_handshake_wakes_the_tui() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("worker.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let snapshot = test_snapshot();
+        let worker = spawn_worker(
+            listener,
+            WorkerReply {
+                protocol_version: IPC_PROTOCOL_VERSION.to_owned(),
+                command_id: String::new(),
+                ok: true,
+                revision: Some(snapshot.revision),
+                snapshot: Some(snapshot),
+                artifact_path: None,
+                message: Some("subscribed".to_owned()),
+                error: None,
+            },
+        );
+        let backend = UnixBackend::new(socket, Some("rain-apartment".to_owned()));
+        let subscription = backend.subscribe();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !subscription.changed() && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(std::time::Instant::now() < deadline);
+        drop(subscription);
+
+        let request = worker.join().unwrap();
+        assert_eq!(
+            request.command,
+            WorkerCommand::Subscribe {
+                project_revision: 0,
+                queue_revision: 0,
             }
         );
     }

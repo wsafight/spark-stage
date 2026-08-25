@@ -38,6 +38,8 @@ enum Command {
     Script(ScriptArgs),
     /// Queue camera work for approved shots.
     Shots(ShotsArgs),
+    /// Assemble reviewed takes into draft, trailer, or final outputs.
+    Edit(EditArgs),
     /// Open the Ratatui production console connected to the worker.
     Tui(TuiArgs),
 }
@@ -158,6 +160,50 @@ struct ScriptArgs {
 struct ShotsArgs {
     #[command(subcommand)]
     command: ShotsCommand,
+}
+
+#[derive(Debug, Args)]
+struct EditArgs {
+    #[command(subcommand)]
+    command: EditCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum EditCommand {
+    /// Build a dynamic draft or the final full-length cut.
+    Build {
+        #[arg(long, value_name = "PROJECT_ID")]
+        project: String,
+        #[arg(long, value_parser = ["draft", "final"], default_value = "final")]
+        kind: String,
+        /// Build a draft from a comma-separated shot list or range such as S04-S07,S10.
+        #[arg(long, value_name = "SHOT_SELECTION")]
+        shots: Option<String>,
+        #[command(flatten)]
+        connection: ConnectionArgs,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Build a deterministic two-second-per-shot trailer montage.
+    Trailer {
+        #[arg(long, value_name = "PROJECT_ID")]
+        project: String,
+        #[command(flatten)]
+        connection: ConnectionArgs,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Resolve an immutable build output for preview or automation.
+    Open {
+        #[arg(long, value_name = "PROJECT_ID")]
+        project: String,
+        #[arg(long, value_name = "BUILD_ID")]
+        build: String,
+        #[command(flatten)]
+        connection: ConnectionArgs,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -355,6 +401,7 @@ fn execute(cli: Cli) -> Result<ExitCode, CliError> {
             } => approve_script(&project, &connection, json),
         },
         Command::Shots(args) => execute_shots(args),
+        Command::Edit(args) => execute_edit(args),
         Command::Tui(args) => {
             crate::tui::run(crate::tui::TuiOptions {
                 socket: args.socket.unwrap_or_else(crate::tui::default_socket_path),
@@ -364,6 +411,126 @@ fn execute(cli: Cli) -> Result<ExitCode, CliError> {
             Ok(ExitCode::SUCCESS)
         }
     }
+}
+
+fn execute_edit(args: EditArgs) -> Result<ExitCode, CliError> {
+    let (project, connection, command, json, mutating) = match args.command {
+        EditCommand::Build {
+            project,
+            kind,
+            shots,
+            connection,
+            json,
+        } => {
+            if shots.is_some() && kind != "draft" {
+                return Err(CliError::InvalidInput(
+                    "--shots is only valid with --kind draft".to_owned(),
+                ));
+            }
+            let shot_ids = shots
+                .as_deref()
+                .map(expand_shot_selection)
+                .transpose()
+                .map_err(CliError::InvalidInput)?
+                .unwrap_or_default();
+            (
+                project,
+                connection,
+                IpcCommand::Build { kind, shot_ids },
+                json,
+                true,
+            )
+        }
+        EditCommand::Trailer {
+            project,
+            connection,
+            json,
+        } => (
+            project,
+            connection,
+            IpcCommand::Build {
+                kind: "trailer".to_owned(),
+                shot_ids: Vec::new(),
+            },
+            json,
+            true,
+        ),
+        EditCommand::Open {
+            project,
+            build,
+            connection,
+            json,
+        } => (
+            project,
+            connection,
+            IpcCommand::OpenBuild { build_id: build },
+            json,
+            false,
+        ),
+    };
+    let client = WorkerClient::new(resolved_paths(&connection).socket, Some(project.to_owned()));
+    let revision = if mutating {
+        Some(current_revision(&client)?)
+    } else {
+        None
+    };
+    let reply = client.send(command, revision)?;
+    print_reply(&reply, json)?;
+    Ok(ExitCode::SUCCESS)
+}
+
+fn expand_shot_selection(value: &str) -> Result<Vec<String>, String> {
+    const MAX_EXPANDED_SHOTS: usize = 1_000;
+
+    let mut result = Vec::new();
+    for raw_segment in value.split(',') {
+        let segment = raw_segment.trim();
+        if segment.is_empty() {
+            return Err("shot selection contains an empty item".to_owned());
+        }
+        let Some((start, end)) = segment.split_once('-') else {
+            if result.len() >= MAX_EXPANDED_SHOTS {
+                return Err(format!(
+                    "shot selection expands beyond {MAX_EXPANDED_SHOTS} items"
+                ));
+            }
+            result.push(segment.to_owned());
+            continue;
+        };
+        if end.contains('-') {
+            return Err(format!("invalid shot range `{segment}`"));
+        }
+        let (start_prefix, start_number, start_width) = split_numeric_suffix(start)
+            .ok_or_else(|| format!("range start `{start}` must end in digits"))?;
+        let (end_prefix, end_number, end_width) = split_numeric_suffix(end)
+            .ok_or_else(|| format!("range end `{end}` must end in digits"))?;
+        if start_prefix != end_prefix || start_number > end_number {
+            return Err(format!("invalid ascending shot range `{segment}`"));
+        }
+        let width = start_width.max(end_width);
+        for number in start_number..=end_number {
+            if result.len() >= MAX_EXPANDED_SHOTS {
+                return Err(format!(
+                    "shot selection expands beyond {MAX_EXPANDED_SHOTS} items"
+                ));
+            }
+            result.push(format!("{start_prefix}{number:0width$}"));
+        }
+    }
+    if result.is_empty() {
+        return Err("shot selection is empty".to_owned());
+    }
+    Ok(result)
+}
+
+fn split_numeric_suffix(value: &str) -> Option<(&str, u32, usize)> {
+    let digit_start = value.find(|character: char| character.is_ascii_digit())?;
+    let (prefix, digits) = value.split_at(digit_start);
+    if prefix.is_empty() || digits.is_empty() || !digits.chars().all(|value| value.is_ascii_digit())
+    {
+        return None;
+    }
+    Some((prefix, digits.parse().ok()?, digits.len()))
 }
 
 fn execute_shots(args: ShotsArgs) -> Result<ExitCode, CliError> {
@@ -805,77 +972,4 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn schema_write_is_atomic_and_parseable() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("nested/script-bundle.schema.json");
-
-        assert_eq!(write_schema(Some(&path)).unwrap(), ExitCode::SUCCESS);
-        let value: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
-        assert_eq!(value["title"], "ScriptBundle");
-    }
-
-    #[test]
-    fn tui_arguments_parse_without_starting_terminal() {
-        let cli = Cli::try_parse_from([
-            "sparkstage",
-            "tui",
-            "--socket",
-            "/tmp/sparkstage-test.sock",
-            "--project",
-            "rain-apartment",
-            "--refresh-ms",
-            "250",
-        ])
-        .unwrap();
-
-        let Command::Tui(args) = cli.command else {
-            panic!("expected tui command");
-        };
-        assert_eq!(
-            args.socket,
-            Some(PathBuf::from("/tmp/sparkstage-test.sock"))
-        );
-        assert_eq!(args.project.as_deref(), Some("rain-apartment"));
-        assert_eq!(args.refresh_ms, 250);
-    }
-
-    #[test]
-    fn shot_decision_commands_parse_stable_ids() {
-        let cli = Cli::try_parse_from([
-            "sparkstage",
-            "shots",
-            "select",
-            "--project",
-            "rain-apartment",
-            "--shot",
-            "S01",
-            "--take",
-            "TAKE-01ARZ3NDEKTSV4RRFFQ69G5FAV",
-            "--json",
-        ])
-        .unwrap();
-
-        let Command::Shots(ShotsArgs {
-            command:
-                ShotsCommand::Select {
-                    project,
-                    shot,
-                    take,
-                    json,
-                    ..
-                },
-        }) = cli.command
-        else {
-            panic!("expected shots select command");
-        };
-        assert_eq!(project, "rain-apartment");
-        assert_eq!(shot, "S01");
-        assert_eq!(take, "TAKE-01ARZ3NDEKTSV4RRFFQ69G5FAV");
-        assert!(json);
-    }
-}
+mod tests;

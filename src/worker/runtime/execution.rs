@@ -173,6 +173,7 @@ impl WorkerRuntime {
                 current.updated_at = timestamp();
                 job.state = JobState::Blocked;
                 store.save_job(&job)?;
+                self.touch_queue_revision()?;
                 Ok(None)
             }
             AttemptState::Submitted | AttemptState::Running => {
@@ -270,16 +271,17 @@ impl WorkerRuntime {
         }
         state.recent_failures.push(failure);
         state.bump_revision(now).map_err(StoreError::Invariant)?;
-        store
-            .save_state(&state, expected_revision)
-            .map_err(Into::into)
+        store.save_state(&state, expected_revision)?;
+        self.touch_queue_revision()
     }
 
     pub(super) fn apply_executor_event(
         &mut self,
         event: ExecutorEvent,
     ) -> Result<Option<ExecutorRequest>, WorkerRunError> {
-        match event {
+        let changes_state = !matches!(&event, ExecutorEvent::Cancelled { .. });
+        let queue_revision = self.queue.revision;
+        let result: Result<Option<ExecutorRequest>, WorkerRunError> = match event {
             ExecutorEvent::Prepared {
                 mut context,
                 prepared,
@@ -427,7 +429,16 @@ impl WorkerRuntime {
                 store.save_job(&job)?;
                 Ok(None)
             }
+            ExecutorEvent::Cancelled { job_id, request_id } => {
+                let _cancelled_request = (job_id, request_id);
+                Ok(None)
+            }
+        };
+        let next_request = result?;
+        if changes_state && self.queue.revision == queue_revision {
+            self.touch_queue_revision()?;
         }
+        Ok(next_request)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -495,7 +506,9 @@ impl WorkerRuntime {
             .bump_revision(timestamp())
             .map_err(StoreError::Invariant)?;
         store.save_state(&state, expected_revision)?;
-        self.finish_running_queue(job_id)
+        self.finish_running_queue(job_id)?;
+        self.schedule_next_audition(&store, &job.shot_id, Some(&job.adapter_fingerprint))?;
+        Ok(())
     }
 
     fn fail_job(
@@ -520,6 +533,7 @@ impl WorkerRuntime {
         if let Some(shot) = state.shots.get_mut(&job.shot_id) {
             shot.stage = ShotStage::Failed;
             shot.active_job_id = None;
+            shot.audition_target_takes = None;
             if !shot.fail_codes.iter().any(|existing| existing == code) {
                 shot.fail_codes.push(code.to_owned());
             }

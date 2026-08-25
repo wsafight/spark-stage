@@ -174,15 +174,36 @@ pub fn inspect(
 pub fn missing_runtime_capabilities() -> Result<Vec<String>, MediaError> {
     let filters = command_listing("-filters")?;
     let muxers = command_listing("-muxers")?;
+    let encoders = command_listing("-encoders")?;
     let mut missing = Vec::new();
-    for name in ["blackdetect", "freezedetect", "silencedetect"] {
+    for name in [
+        "blackdetect",
+        "freezedetect",
+        "silencedetect",
+        "scale",
+        "pad",
+        "fps",
+        "setsar",
+        "aresample",
+        "loudnorm",
+        "concat",
+        "trim",
+        "setpts",
+        "atrim",
+        "asetpts",
+    ] {
         if !listing_contains(&filters, name) {
             missing.push(format!("filter:{name}"));
         }
     }
-    for name in ["null", "image2"] {
+    for name in ["null", "image2", "mp4"] {
         if !listing_contains(&muxers, name) {
             missing.push(format!("muxer:{name}"));
+        }
+    }
+    for name in ["libx264", "aac"] {
+        if !listing_contains(&encoders, name) {
+            missing.push(format!("encoder:{name}"));
         }
     }
     Ok(missing)

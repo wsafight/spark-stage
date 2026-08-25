@@ -201,6 +201,102 @@ fn take_decisions_reject_stale_and_cross_shot_targets() {
 }
 
 #[test]
+fn changing_selected_take_marks_affected_build_stale() {
+    let (_directory, store, first_take_id) = decision_store();
+    let selected = store
+        .select_take("S01", &first_take_id, 2, "select-first", "102")
+        .unwrap();
+    let second_take_id = "TAKE-00000000000000000000000001".to_owned();
+    let mut state = selected;
+    state
+        .takes
+        .insert(second_take_id.clone(), take(&second_take_id, "S01", false));
+    state
+        .shots
+        .get_mut("S01")
+        .unwrap()
+        .take_ids
+        .push(second_take_id.clone());
+    let build_id = "BLD-selection";
+    let recipe_path = PathBuf::from("builds/BLD-selection/recipe.json");
+    let first = &state.takes[&first_take_id];
+    write_json_atomic(
+        &store.root().join(&recipe_path),
+        &crate::build::BuildRecipe {
+            schema_version: crate::build::BUILD_RECIPE_SCHEMA_VERSION.to_owned(),
+            build_id: build_id.to_owned(),
+            project_id: state.project_id.clone(),
+            contract_id: None,
+            contract_hash: "contract".to_owned(),
+            source_revision: state.revision,
+            kind: crate::build::BuildKind::Draft,
+            width: 960,
+            height: 544,
+            fps: 24,
+            expected_duration_seconds: 5,
+            inputs: vec![crate::build::BuildInput {
+                shot_id: "S01".to_owned(),
+                take_id: first.take_id.clone(),
+                media_path: first.media_path.clone(),
+                profile: first.profile.clone(),
+                input_hash: first.input_hash.clone(),
+                adapter_fingerprint: first.adapter_fingerprint.clone(),
+                workflow_hash: first.workflow_hash.clone(),
+                model_fingerprint: first.model_fingerprint.clone(),
+                seed: first.seed,
+                warnings: Vec::new(),
+                first_frame_path: None,
+                trim_seconds: None,
+            }],
+            output_path: PathBuf::from("builds/BLD-selection/output.mp4"),
+            delivery_path: PathBuf::from("review/draft-cut.mp4"),
+        },
+    )
+    .unwrap();
+    state.builds.insert(
+        build_id.to_owned(),
+        crate::domain::BuildRecord {
+            build_id: build_id.to_owned(),
+            kind: "draft".to_owned(),
+            status: "needs_review".to_owned(),
+            recipe: recipe_path.to_string_lossy().into_owned(),
+            command_id: "build".to_owned(),
+            output_path: Some(PathBuf::from("builds/BLD-selection/output.mp4")),
+            warnings: Vec::new(),
+            stale: false,
+        },
+    );
+    state.pending_approvals.push(Approval {
+        approval_id: "APR-build-selection".to_owned(),
+        kind: ApprovalKind::BuildReview,
+        subject_id: Some(build_id.to_owned()),
+        shot_id: None,
+        take_ids: Vec::new(),
+        blocking: true,
+        description: "Review draft build".to_owned(),
+        created_at: "103".to_owned(),
+    });
+    state.bump_revision("103".to_owned()).unwrap();
+    store.save_state(&state, 3).unwrap();
+
+    let changed = store
+        .select_take("S01", &second_take_id, 4, "select-second", "104")
+        .unwrap();
+
+    assert!(changed.builds[build_id].stale);
+    assert!(
+        changed
+            .pending_approvals
+            .iter()
+            .all(|approval| approval.subject_id.as_deref() != Some(build_id))
+    );
+    assert_eq!(
+        changed.project_outcome,
+        crate::domain::ProjectOutcome::InProgress
+    );
+}
+
+#[test]
 fn replacement_bundle_cannot_be_approved_while_a_shot_job_is_active() {
     let directory = tempfile::tempdir().unwrap();
     let mut bundle = validate_json(BUNDLE).bundle.unwrap();
@@ -265,4 +361,148 @@ fn replacement_bundle_cannot_be_approved_while_a_shot_job_is_active() {
         store.read_state().unwrap().active_contract_id,
         Some(job.contract_id)
     );
+}
+
+#[test]
+fn replacement_bundle_cannot_be_approved_while_a_build_is_running() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut bundle = validate_json(BUNDLE).bundle.unwrap();
+    let store = ProjectStore::create(
+        directory.path(),
+        &bundle.project.id,
+        &bundle.project.title,
+        "A brief.",
+        "create",
+        "100",
+    )
+    .unwrap();
+    let (_, initial_approval) = store
+        .apply_bundle(&bundle, 1, "apply-initial", "101")
+        .unwrap();
+    store
+        .approve_script(
+            Some(&initial_approval.approval_id),
+            2,
+            "approve-initial",
+            "102",
+        )
+        .unwrap();
+    store
+        .start_build(
+            crate::domain::BuildRecord {
+                build_id: "BLD-running".to_owned(),
+                kind: "draft".to_owned(),
+                status: "queued".to_owned(),
+                recipe: "builds/BLD-running/recipe.json".to_owned(),
+                command_id: "build".to_owned(),
+                output_path: None,
+                warnings: Vec::new(),
+                stale: false,
+            },
+            3,
+            "build",
+            "103",
+        )
+        .unwrap();
+    bundle.project.title = "Replacement".to_owned();
+    let (_, replacement_approval) = store
+        .apply_bundle(&bundle, 4, "apply-replacement", "104")
+        .unwrap();
+
+    let error = store
+        .approve_script(
+            Some(&replacement_approval.approval_id),
+            5,
+            "approve-replacement",
+            "105",
+        )
+        .unwrap_err();
+
+    assert!(matches!(error, StoreError::BuildBusy { .. }));
+}
+
+#[test]
+fn build_review_gate_controls_quality_and_project_completion() {
+    for (kind, approval_kind, expected_stage, expected_quality, expected_outcome) in [
+        (
+            "draft",
+            ApprovalKind::BuildReview,
+            ProjectStage::Shooting,
+            crate::domain::QualityTarget::DraftCut,
+            crate::domain::ProjectOutcome::InProgress,
+        ),
+        (
+            "final",
+            ApprovalKind::FinalVisualReview,
+            ProjectStage::Completed,
+            crate::domain::QualityTarget::Playable,
+            crate::domain::ProjectOutcome::Done,
+        ),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let store =
+            ProjectStore::create(directory.path(), "demo", "Demo", "Brief", "create", "100")
+                .unwrap();
+        let build_id = format!("BLD-{kind}");
+        let queued = store
+            .start_build(
+                crate::domain::BuildRecord {
+                    build_id: build_id.clone(),
+                    kind: kind.to_owned(),
+                    status: "queued".to_owned(),
+                    recipe: format!("builds/{build_id}/recipe.json"),
+                    command_id: "build".to_owned(),
+                    output_path: None,
+                    warnings: Vec::new(),
+                    stale: false,
+                },
+                1,
+                "build",
+                "101",
+            )
+            .unwrap();
+        assert_eq!(queued.builds[&build_id].status, "queued");
+        let running = store
+            .mark_build_running(&build_id, queued.revision, "build", "102")
+            .unwrap();
+        assert_eq!(running.builds[&build_id].status, "running");
+        let output = store.root().join(format!("builds/{build_id}/output.mp4"));
+        fs::create_dir_all(output.parent().unwrap()).unwrap();
+        fs::write(&output, b"video").unwrap();
+        let review = store
+            .finish_build(
+                &build_id,
+                Some(PathBuf::from(format!("builds/{build_id}/output.mp4"))),
+                None,
+                false,
+                running.revision,
+                "build",
+                "103",
+            )
+            .unwrap();
+        let approval = review
+            .pending_approvals
+            .iter()
+            .find(|approval| approval.subject_id.as_deref() == Some(build_id.as_str()))
+            .unwrap();
+        assert_eq!(approval.kind, approval_kind);
+        assert_eq!(
+            review.project_outcome,
+            crate::domain::ProjectOutcome::NeedsReview
+        );
+
+        let approved = store
+            .approve_build_review(
+                &approval.approval_id,
+                review.revision,
+                "approve-build",
+                "104",
+            )
+            .unwrap();
+
+        assert_eq!(approved.builds[&build_id].status, "approved");
+        assert_eq!(approved.project_stage, expected_stage);
+        assert_eq!(approved.quality_target, expected_quality);
+        assert_eq!(approved.project_outcome, expected_outcome);
+    }
 }

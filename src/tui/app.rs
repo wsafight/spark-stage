@@ -134,6 +134,10 @@ impl<B: TuiBackend> App<B> {
         self.refresh(Instant::now());
     }
 
+    pub fn refresh_now(&mut self) {
+        self.refresh(Instant::now());
+    }
+
     pub fn tick(&mut self, now: Instant) {
         if now >= self.next_refresh_at {
             self.refresh(now);
@@ -477,7 +481,10 @@ impl<B: TuiBackend> App<B> {
             .map_or_else(|| "draft".to_owned(), |build| build.kind.clone());
         self.confirmation = Some(Confirmation {
             prompt: format!("Build or rebuild {kind}?"),
-            command: WorkerCommand::Build { kind },
+            command: WorkerCommand::Build {
+                kind,
+                shot_ids: Vec::new(),
+            },
         });
     }
 

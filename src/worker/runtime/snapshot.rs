@@ -187,6 +187,7 @@ impl WorkerRuntime {
                 })
                 .collect(),
             queue: QueueSummary {
+                revision: self.queue.revision,
                 paused: self.queue.paused,
                 jobs: queue_jobs,
             },
@@ -198,11 +199,13 @@ impl WorkerRuntime {
                     kind: build.kind.clone(),
                     status: build.status.clone(),
                     recipe: build.recipe.clone(),
+                    command_id: build.command_id.clone(),
                     output_path: build
                         .output_path
                         .as_ref()
                         .map(|path| store.root().join(path)),
                     warnings: build.warnings.clone(),
+                    stale: build.stale,
                 })
                 .collect(),
             diagnostics: vec![DiagnosticSummary {

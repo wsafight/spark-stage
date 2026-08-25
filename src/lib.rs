@@ -1,4 +1,5 @@
 pub mod adapter;
+pub mod build;
 pub mod cli;
 pub mod domain;
 pub mod ipc;
