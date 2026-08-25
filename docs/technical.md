@@ -710,7 +710,7 @@ MVP 不依赖 Kitty / Sixel 等终端图片协议。`preview` 向 worker 请求�
 - Ratatui TestBackend 的宽 / 窄布局与关键状态快照
 - panic 和退出后的终端恢复单元边界
 
-GitHub Actions 在 Linux/macOS 上执行 fmt、严格 Clippy 和 all-target tests；Linux 安装标准 FFmpeg，使合成媒体测试走完整路径。CI 还要求每个 Rust 文件少于 900 行，超过阈值时应按职责拆分模块，而不是压缩格式。另有 Linux aarch64 cross-check、`cargo llvm-cov --fail-under-lines 65`、`cargo audit --deny warnings` 和 `cargo deny check`。本地随应用附带的裁剪版 FFmpeg 若缺 lavfi 源会在 fixture preflight 阶段跳过，因此本地“测试通过”不能代替 CI 的标准 FFmpeg 结果。
+GitHub Actions 在 Linux/macOS 上执行 fmt、严格 Clippy 和 all-target tests；Linux 安装标准 FFmpeg，使合成媒体测试走完整路径。CI 还要求每个 Rust 文件少于 900 行，超过阈值时应按职责拆分模块，而不是压缩格式。另有 Linux aarch64 cross-check、`cargo llvm-cov --fail-under-lines 70`、`cargo audit --deny warnings` 和 `cargo deny check`。当前无 GPU 基线为 221 个测试、70.07% 行覆盖率；关键纯逻辑目标为 85%+。全局覆盖率先稳定在 70%–75%，不为统一达到 90% 测试终端 raw mode、平台外壳或未接入的 DGX/H3 路径。本地随应用附带的裁剪版 FFmpeg 若缺 lavfi 源会在 fixture preflight 阶段跳过，因此本地“测试通过”不能代替 CI 的标准 FFmpeg 结果。
 
 ### 22.2 DGX Spark 集成测试
 

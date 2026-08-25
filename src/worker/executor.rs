@@ -671,16 +671,4 @@ fn send_event(events: &Sender<ExecutorEvent>, event: ExecutorEvent) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn cancellation_signal_releases_waiter() {
-        let cancellation = ExecutorCancellation::default();
-        cancellation.request("JOB-test");
-
-        tokio::time::timeout(Duration::from_millis(100), cancellation.wait("JOB-test"))
-            .await
-            .unwrap();
-    }
-}
+mod tests;

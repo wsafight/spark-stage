@@ -59,7 +59,7 @@ jobs:
       - name: Install FFmpeg
         run: sudo apt-get update && sudo apt-get install --yes ffmpeg
       - name: Enforce line coverage
-        run: cargo llvm-cov --all-targets --all-features --fail-under-lines 65
+        run: cargo llvm-cov --all-targets --all-features --fail-under-lines 70
 
   supply-chain:
     name: Dependency security

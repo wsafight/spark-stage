@@ -18,7 +18,7 @@
 | 8 | Ratatui P0 控制台 | 已实现 | 10 个页面共用 worker 命令面；项目切换、批量审片、预算、清理与 committed history 均可操作 |
 | 9 | 崩溃一致性与审计恢复 | 已实现 | decision 两阶段 prepared/committed；prepared 不对外显示；cleanup apply/restore 可从实际文件位置续跑 |
 | 10 | 项目可移植性 | 已实现 | 项目校验、逐文件 SHA-256 TAR、verify-before-import、禁止覆盖、迁移 dry-run 和修改前备份 |
-| 11 | 自动化质量门禁 | 已实现 | Linux/macOS CI、标准 FFmpeg 合成媒体、65% 行覆盖率、aarch64 check、audit/deny 和 Agent 合同夹具 |
+| 11 | 自动化质量门禁 | 已实现 | Linux/macOS CI、标准 FFmpeg 合成媒体、70% 行覆盖率、aarch64 check、audit/deny 和 Agent 合同夹具 |
 
 ## 2. 命令面
 
@@ -140,4 +140,4 @@ sparkstage tui [--project PROJECT_ID]
 - 项目归档覆盖 payload 篡改、symlink、目标冲突、导入拒绝覆盖和迁移备份。
 - 两套独立完整 ScriptBundle 与拒绝样例使用固定 expectation 回归，不在测试里调用 LLM。
 - 标准 FFmpeg 环境执行无音轨、静音、黑帧、静帧、时长、FPS、边界帧和两镜 build；能力不足只能在夹具生成前跳过。
-- 全量 `cargo test --all-targets`、严格 Clippy、65% 行覆盖率、cargo-audit 和 cargo-deny 必须通过。
+- 全量 `cargo test --all-targets`、严格 Clippy、70% 行覆盖率、cargo-audit 和 cargo-deny 必须通过。当前无 GPU 基线为 221 个测试、70.07% 行覆盖率；关键纯逻辑按 85%+ 维护，不为统一追求 90% 添加无行为价值的测试。

@@ -36,8 +36,10 @@ cargo fmt --all --check
 sh scripts/check-rust-file-size.sh
 cargo test --all-targets
 cargo clippy --all-targets --all-features -- -D warnings
-cargo llvm-cov --all-targets --all-features --fail-under-lines 65
+cargo llvm-cov --all-targets --all-features --fail-under-lines 70
 ```
+
+The current non-GPU baseline is 221 tests and 70.07% line coverage. Critical pure logic is held to a higher 85%+ target where practical; DGX/H3 execution paths remain outside this claim until hardware evidence exists.
 
 - [Product document](docs/product.md)
 - [Technical design](docs/technical.md)
