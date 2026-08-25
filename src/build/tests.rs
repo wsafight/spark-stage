@@ -1,7 +1,9 @@
+use std::ffi::OsStr;
 use std::sync::mpsc::TryRecvError;
 
 use super::*;
 use crate::domain::{ProjectState, Risk, ShotRuntimeState, ShotStage, TakeMetadata};
+use crate::test_support::{ffmpeg_fixture_runtime_available, run_ffmpeg};
 
 const BUNDLE: &str = include_str!("../../skills/screenwriter/examples/valid-short-drama.json");
 
@@ -373,4 +375,131 @@ fn executor_reports_started_before_terminal_event() {
 
     assert!(matches!(receive(), BuildEvent::Started(_)));
     assert!(matches!(receive(), BuildEvent::Failed { .. }));
+}
+
+#[test]
+fn synthetic_two_clip_build_publishes_verified_artifacts() {
+    if !synthetic_build_runtime_available() {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let mut inputs = Vec::new();
+    for (index, frequency) in [440, 880].into_iter().enumerate() {
+        let shot_id = format!("S{:02}", index + 1);
+        let take_id = format!("TAKE-{}", index + 1);
+        let media_path = PathBuf::from("raw")
+            .join(&shot_id)
+            .join(format!("{take_id}.mp4"));
+        std::fs::create_dir_all(root.join("raw").join(&shot_id)).unwrap();
+        generate_build_clip(&root.join(&media_path), frequency);
+        let frame = crate::media::extract_boundaries(
+            &root.join(&media_path),
+            &root.join("review").join(&shot_id),
+            &take_id,
+            1.0,
+        )
+        .unwrap();
+        inputs.push(BuildInput {
+            shot_id,
+            take_id,
+            media_path,
+            profile: "audition".to_owned(),
+            input_hash: format!("input-{index}"),
+            adapter_fingerprint: "synthetic-adapter".to_owned(),
+            workflow_hash: "synthetic-workflow".to_owned(),
+            model_fingerprint: "synthetic-model".to_owned(),
+            seed: u64::try_from(index).unwrap(),
+            warnings: Vec::new(),
+            first_frame_path: Some(frame.first.strip_prefix(root).unwrap().to_owned()),
+            trim_seconds: None,
+        });
+    }
+    let recipe = BuildRecipe {
+        schema_version: BUILD_RECIPE_SCHEMA_VERSION.to_owned(),
+        build_id: "BLD-synthetic".to_owned(),
+        project_id: "synthetic".to_owned(),
+        contract_id: Some("CONTRACT-synthetic".to_owned()),
+        contract_hash: "contract-hash".to_owned(),
+        source_revision: 3,
+        kind: BuildKind::Draft,
+        width: 160,
+        height: 96,
+        fps: 12,
+        expected_duration_seconds: 2,
+        inputs,
+        output_path: PathBuf::from("builds/BLD-synthetic/output.mp4"),
+        delivery_path: PathBuf::from("review/draft-cut.mp4"),
+    };
+    let recipe_path = root.join("builds/BLD-synthetic/recipe.json");
+    crate::store::write_json_atomic(&recipe_path, &recipe).unwrap();
+
+    run(root, &recipe).unwrap();
+
+    let output = root.join(&recipe.output_path);
+    let delivery = root.join(&recipe.delivery_path);
+    assert!(output.is_file());
+    assert_eq!(
+        std::fs::read(&output).unwrap(),
+        std::fs::read(&delivery).unwrap()
+    );
+    let media = crate::media::inspect(&output, 2, true).unwrap();
+    assert!(media.valid, "{media:#?}");
+    assert_eq!((media.width, media.height), (160, 96));
+    assert!((media.fps - 12.0).abs() < 0.01);
+    assert!(
+        root.join("builds/BLD-synthetic/contact-sheet.jpg")
+            .is_file()
+    );
+    assert!(root.join("review/contact-sheet.jpg").is_file());
+
+    let report: BuildReviewReport =
+        crate::store::read_json(&root.join("builds/BLD-synthetic/review-report.json")).unwrap();
+    assert_eq!(report.recipe, recipe);
+    assert_eq!(
+        report.recipe_path,
+        PathBuf::from("builds/BLD-synthetic/recipe.json")
+    );
+    assert_eq!(
+        report.contact_sheet_path,
+        PathBuf::from("builds/BLD-synthetic/contact-sheet.jpg")
+    );
+    assert!(report.human_visual_review_required);
+    assert!(report.media.valid);
+    assert_eq!(report.recipe.inputs[0].input_hash, "input-0");
+    assert_eq!(report.recipe.inputs[1].seed, 1);
+}
+
+fn synthetic_build_runtime_available() -> bool {
+    ffmpeg_fixture_runtime_available(&["sine", "testsrc2"])
+        && matches!(missing_runtime_capabilities(), Ok(missing) if missing.is_empty())
+        && matches!(crate::media::missing_runtime_capabilities(), Ok(missing) if missing.is_empty())
+}
+
+fn generate_build_clip(path: &Path, frequency: u32) {
+    let video_source = "testsrc2=size=160x96:rate=12:duration=1";
+    let audio_source = format!("sine=frequency={frequency}:sample_rate=48000:duration=1");
+    run_ffmpeg([
+        OsStr::new("-hide_banner"),
+        OsStr::new("-loglevel"),
+        OsStr::new("error"),
+        OsStr::new("-nostdin"),
+        OsStr::new("-y"),
+        OsStr::new("-f"),
+        OsStr::new("lavfi"),
+        OsStr::new("-i"),
+        OsStr::new(video_source),
+        OsStr::new("-f"),
+        OsStr::new("lavfi"),
+        OsStr::new("-i"),
+        OsStr::new(&audio_source),
+        OsStr::new("-shortest"),
+        OsStr::new("-c:v"),
+        OsStr::new("libx264"),
+        OsStr::new("-pix_fmt"),
+        OsStr::new("yuv420p"),
+        OsStr::new("-c:a"),
+        OsStr::new("aac"),
+        path.as_os_str(),
+    ]);
 }

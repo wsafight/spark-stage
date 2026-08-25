@@ -26,6 +26,8 @@ Do not inspect `raw/`, `refs/`, `final/`, unrelated projects, or user media unle
 4. Fix the exact JSON Pointer errors and validate again. Stop after two failed repair passes and report the remaining errors instead of silently weakening the story or schema.
 5. Present a compact summary of the valid bundle. Do not run `script apply`, `script approve`, or any H3 command unless the user has explicitly asked to import or produce the project.
 
+When the Agent host and model identity are available, write them to `authoring.agent_host` and `authoring.model`; never include API keys, account IDs, hidden reasoning, or the full chat transcript. Checked-in files under `tests/fixtures/agent-script-bundles/` are evaluation data, not extra authoring context: do not copy their story content into a user project.
+
 ## Output Boundary
 
 Return or write exactly one JSON bundle. Preserve the original brief. All character and location references must use stable IDs, all on-screen characters must appear in each shot's `characters`, and dialogue must fit the shot duration budget. A valid bundle is ready for human approval, not automatically approved for filming.

@@ -1,8 +1,13 @@
 use super::*;
 
+mod budget;
 mod cancellation;
 mod execution;
+mod history;
+mod projects;
 mod recovery;
+mod review;
+mod storage;
 
 const BUNDLE: &str = include_str!("../../../skills/screenwriter/examples/valid-short-drama.json");
 

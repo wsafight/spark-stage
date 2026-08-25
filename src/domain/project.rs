@@ -54,6 +54,109 @@ pub enum QualityTarget {
     Approved,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BudgetOverrunPolicy {
+    Stop,
+    DeliverCurrentDraft,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BudgetEstimateProfile {
+    pub source: String,
+    pub audition_wall_seconds_per_video_second: u64,
+    pub final_wall_seconds_per_video_second: u64,
+    pub audition_bytes_per_video_second: u64,
+    pub final_bytes_per_video_second: u64,
+}
+
+impl Default for BudgetEstimateProfile {
+    fn default() -> Self {
+        Self {
+            source: "unmeasured_default_v1".to_owned(),
+            audition_wall_seconds_per_video_second: 30,
+            final_wall_seconds_per_video_second: 120,
+            audition_bytes_per_video_second: 4 * 1024 * 1024,
+            final_bytes_per_video_second: 12 * 1024 * 1024,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BudgetContract {
+    pub contract_revision: u64,
+    pub wall_clock_limit_seconds: u64,
+    pub max_audition_takes_per_shot: u32,
+    pub max_final_takes_per_shot: u32,
+    pub minimum_disk_free_bytes: u64,
+    pub allow_cloud_cost: bool,
+    pub overrun_policy: BudgetOverrunPolicy,
+    pub estimate: BudgetEstimateProfile,
+}
+
+impl Default for BudgetContract {
+    fn default() -> Self {
+        Self {
+            contract_revision: 1,
+            wall_clock_limit_seconds: 4 * 60 * 60,
+            max_audition_takes_per_shot: 3,
+            max_final_takes_per_shot: 2,
+            minimum_disk_free_bytes: 5 * 1024 * 1024 * 1024,
+            allow_cloud_cost: false,
+            overrun_policy: BudgetOverrunPolicy::Stop,
+            estimate: BudgetEstimateProfile::default(),
+        }
+    }
+}
+
+impl BudgetContract {
+    pub fn validate(&self) -> Result<(), StateInvariantError> {
+        let estimate = &self.estimate;
+        if self.contract_revision == 0
+            || self.wall_clock_limit_seconds == 0
+            || self.max_audition_takes_per_shot == 0
+            || self.max_final_takes_per_shot == 0
+            || self.minimum_disk_free_bytes == 0
+            || estimate.source.trim().is_empty()
+            || estimate.audition_wall_seconds_per_video_second == 0
+            || estimate.final_wall_seconds_per_video_second == 0
+            || estimate.audition_bytes_per_video_second == 0
+            || estimate.final_bytes_per_video_second == 0
+        {
+            return Err(StateInvariantError::InvalidBudgetContract);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BudgetOverrun {
+    pub approval_id: String,
+    pub scope: String,
+    pub shot_id: String,
+    pub operation: String,
+    #[serde(default)]
+    pub dimensions: Vec<String>,
+    pub reasons: Vec<String>,
+    pub incremental_wall_seconds: u64,
+    pub incremental_disk_bytes: u64,
+    pub requested_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectBudget {
+    #[serde(default)]
+    pub contract: BudgetContract,
+    #[serde(default)]
+    pub overruns: BTreeMap<String, BudgetOverrun>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectState {
@@ -65,6 +168,8 @@ pub struct ProjectState {
     pub project_outcome: ProjectOutcome,
     pub work_mode: WorkMode,
     pub quality_target: QualityTarget,
+    #[serde(default)]
+    pub paused: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_command_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -81,6 +186,8 @@ pub struct ProjectState {
     pub builds: BTreeMap<String, BuildRecord>,
     #[serde(default)]
     pub recent_failures: Vec<FailureRecord>,
+    #[serde(default)]
+    pub budget: ProjectBudget,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -97,6 +204,7 @@ impl ProjectState {
             project_outcome: ProjectOutcome::InProgress,
             work_mode: WorkMode::Director,
             quality_target: QualityTarget::Playable,
+            paused: false,
             last_command_id: None,
             active_contract_id: None,
             contracts: BTreeMap::new(),
@@ -105,6 +213,7 @@ impl ProjectState {
             takes: BTreeMap::new(),
             builds: BTreeMap::new(),
             recent_failures: Vec::new(),
+            budget: ProjectBudget::default(),
             created_at: now.clone(),
             updated_at: now,
         }
@@ -141,6 +250,7 @@ impl ProjectState {
         if self.revision == 0 {
             return Err(StateInvariantError::ZeroRevision);
         }
+        self.budget.contract.validate()?;
         if self
             .active_contract_id
             .as_ref()
@@ -170,6 +280,24 @@ impl ProjectState {
             return Err(StateInvariantError::DuplicateApproval(
                 duplicate.approval_id.clone(),
             ));
+        }
+        for approval in self
+            .pending_approvals
+            .iter()
+            .filter(|approval| approval.kind == ApprovalKind::BudgetOverrun)
+        {
+            let Some(overrun) = self.budget.overruns.get(&approval.approval_id) else {
+                return Err(StateInvariantError::BudgetApprovalMissing(
+                    approval.approval_id.clone(),
+                ));
+            };
+            if overrun.approved_at.is_some()
+                || approval.subject_id.as_deref() != Some(&approval.approval_id)
+            {
+                return Err(StateInvariantError::BudgetApprovalMismatch(
+                    approval.approval_id.clone(),
+                ));
+            }
         }
 
         for (key, take) in &self.takes {
@@ -572,6 +700,12 @@ pub enum StateInvariantError {
     ZeroRevision,
     #[error("project revision overflow")]
     RevisionOverflow,
+    #[error("budget contract contains a zero or empty required value")]
+    InvalidBudgetContract,
+    #[error("budget approval `{0}` has no matching overrun request")]
+    BudgetApprovalMissing(String),
+    #[error("budget approval `{0}` does not match its overrun request")]
+    BudgetApprovalMismatch(String),
     #[error("active contract is missing from the contract index")]
     MissingActiveContract,
     #[error("project outcome does not match blocking approvals")]

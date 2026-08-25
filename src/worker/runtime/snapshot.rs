@@ -52,30 +52,7 @@ impl WorkerRuntime {
                     .collect()
             })
             .unwrap_or_default();
-        let audition_takes_limit = active_bundle.as_ref().map_or(0, |bundle| {
-            bundle
-                .shots
-                .iter()
-                .map(|shot| u32::from(shot.generation_plan.audition_takes))
-                .sum()
-        });
-        let audition_takes_used = active_bundle.as_ref().map_or(0, |bundle| {
-            let count = bundle
-                .shots
-                .iter()
-                .map(|shot| {
-                    state
-                        .takes
-                        .values()
-                        .filter(|take| {
-                            take.shot_id == shot.id
-                                && take.profile == shot.generation_plan.audition_profile
-                        })
-                        .count()
-                })
-                .sum::<usize>();
-            u32::try_from(count).unwrap_or(u32::MAX)
-        });
+        let budget = super::budget::budget_summary(store, &state, active_bundle.as_ref())?;
 
         Ok(AppSnapshot {
             schema_version: crate::domain::PROJECT_SCHEMA_VERSION.to_owned(),
@@ -88,6 +65,7 @@ impl WorkerRuntime {
                 outcome: project_outcome(state.project_outcome).to_owned(),
                 work_mode: work_mode(state.work_mode).to_owned(),
                 quality_target: quality_target(state.quality_target).to_owned(),
+                paused: state.paused,
             },
             gpu: GpuSummary {
                 status: if self.queue.running.is_some() {
@@ -104,11 +82,7 @@ impl WorkerRuntime {
                 progress: None,
                 eta_seconds: None,
             },
-            budget: BudgetSummary {
-                audition_takes_used,
-                audition_takes_limit,
-                ..BudgetSummary::default()
-            },
+            budget,
             pending_approvals: state
                 .pending_approvals
                 .iter()

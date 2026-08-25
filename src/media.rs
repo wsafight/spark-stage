@@ -394,7 +394,12 @@ pub enum MediaError {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsStr;
+
     use super::*;
+    use crate::test_support::{ffmpeg_fixture_runtime_available, run_ffmpeg};
+
+    const SYNTHETIC_FILTERS: &[&str] = &["anullsrc", "color", "sine", "testsrc2"];
 
     #[test]
     fn parses_fractional_frame_rate() {
@@ -438,5 +443,146 @@ mod tests {
         assert!(boundaries.first.is_file());
         assert!(boundaries.last.is_file());
         assert!(boundaries.handoff_candidate.is_file());
+    }
+
+    #[test]
+    fn synthetic_media_checks_audio_duration_and_frame_rate() {
+        if !synthetic_runtime_available() {
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let with_audio = directory.path().join("with-audio.mp4");
+        let without_audio = directory.path().join("without-audio.mp4");
+        generate_video(
+            &with_audio,
+            "testsrc2=size=160x96:rate=12:duration=2",
+            Some("sine=frequency=880:sample_rate=48000:duration=2"),
+        );
+        generate_video(
+            &without_audio,
+            "testsrc2=size=160x96:rate=12:duration=2",
+            None,
+        );
+
+        let report = inspect(&with_audio, 2, true).unwrap();
+        assert!(report.valid, "{report:#?}");
+        assert!((report.fps - 12.0).abs() < 0.01, "{report:#?}");
+        assert_eq!((report.width, report.height), (160, 96));
+        assert!(report.audio_channels.is_some());
+
+        let wrong_duration = inspect(&with_audio, 5, true).unwrap();
+        assert_check(&wrong_duration, "DURATION_OK", MediaCheckStatus::Fail);
+        assert!(!wrong_duration.valid);
+
+        let required = inspect(&without_audio, 2, true).unwrap();
+        assert_check(&required, "AUDIO_PRESENT", MediaCheckStatus::Fail);
+        assert!(!required.valid);
+        let optional = inspect(&without_audio, 2, false).unwrap();
+        assert_check(&optional, "AUDIO_PRESENT", MediaCheckStatus::Pass);
+        assert!(optional.valid, "{optional:#?}");
+    }
+
+    #[test]
+    fn synthetic_media_detects_black_freeze_and_silence() {
+        if !synthetic_runtime_available() {
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let black = directory.path().join("black.mp4");
+        let static_frame = directory.path().join("static.mp4");
+        let silent = directory.path().join("silent.mp4");
+        generate_video(
+            &black,
+            "color=c=black:s=160x96:r=12:d=2",
+            Some("sine=frequency=880:sample_rate=48000:duration=2"),
+        );
+        generate_video(
+            &static_frame,
+            "color=c=red:s=160x96:r=12:d=2",
+            Some("sine=frequency=880:sample_rate=48000:duration=2"),
+        );
+        generate_video(
+            &silent,
+            "testsrc2=size=160x96:rate=12:duration=2",
+            Some("anullsrc=r=48000:cl=stereo"),
+        );
+
+        let black_report = inspect(&black, 2, true).unwrap();
+        assert_check(&black_report, "BLACK_FRAME_LIMIT", MediaCheckStatus::Fail);
+        let static_report = inspect(&static_frame, 2, true).unwrap();
+        assert_check(&static_report, "FREEZE_LIMIT", MediaCheckStatus::Fail);
+        let silent_report = inspect(&silent, 2, true).unwrap();
+        assert_check(&silent_report, "SILENCE_LIMIT", MediaCheckStatus::Fail);
+    }
+
+    #[test]
+    fn synthetic_media_extracts_distinct_boundary_frames() {
+        if !synthetic_runtime_available() {
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let media = directory.path().join("moving.mp4");
+        generate_video(
+            &media,
+            "testsrc2=size=160x96:rate=12:duration=2",
+            Some("sine=frequency=880:sample_rate=48000:duration=2"),
+        );
+        let frames = extract_boundaries(
+            &media,
+            &directory.path().join("review"),
+            "TAKE-SYNTHETIC",
+            2.0,
+        )
+        .unwrap();
+
+        for path in [&frames.first, &frames.last, &frames.handoff_candidate] {
+            assert!(path.is_file());
+            assert!(std::fs::metadata(path).unwrap().len() > 0);
+        }
+        assert_ne!(
+            std::fs::read(&frames.first).unwrap(),
+            std::fs::read(&frames.last).unwrap()
+        );
+    }
+
+    fn synthetic_runtime_available() -> bool {
+        ffmpeg_fixture_runtime_available(SYNTHETIC_FILTERS)
+            && matches!(missing_runtime_capabilities(), Ok(missing) if missing.is_empty())
+    }
+
+    fn generate_video(path: &Path, video_source: &str, audio_source: Option<&str>) {
+        let mut arguments = vec![
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            video_source,
+        ];
+        if let Some(source) = audio_source {
+            arguments.extend(["-f", "lavfi", "-i", source, "-t", "2", "-shortest"]);
+        }
+        arguments.extend(["-c:v", "libx264", "-pix_fmt", "yuv420p"]);
+        if audio_source.is_some() {
+            arguments.extend(["-c:a", "aac"]);
+        }
+        run_ffmpeg(
+            arguments
+                .into_iter()
+                .map(OsStr::new)
+                .chain([path.as_os_str()]),
+        );
+    }
+
+    fn assert_check(report: &MediaReport, code: &str, expected: MediaCheckStatus) {
+        let check = report
+            .checks
+            .iter()
+            .find(|check| check.code == code)
+            .unwrap_or_else(|| panic!("missing media check {code}: {report:#?}"));
+        assert_eq!(check.status, expected, "{check:#?}");
     }
 }

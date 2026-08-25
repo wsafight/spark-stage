@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -5,52 +6,71 @@ use crossterm::event::{KeyCode, KeyEvent};
 
 use super::backend::{BackendError, TuiBackend};
 use super::protocol::{
-    AppSnapshot, ApprovalSummary, BuildSummary, DiagnosticSummary, QueueJobSummary, ShotSummary,
-    TakeSummary, WorkerCommand,
+    AppSnapshot, ApprovalSummary, BuildSummary, DiagnosticSummary, ProjectListItem,
+    QueueJobSummary, ShotSummary, TakeSummary, WorkerCommand,
 };
+use crate::store::{CleanupPlan, DecisionRecord, StorageReport};
+
+mod operations;
 
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
+    Projects,
     Dashboard,
+    Review,
     Shots,
     Takes,
     Queue,
     Builds,
+    Storage,
+    History,
     Diagnostics,
 }
 
 impl Page {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 10] = [
+        Self::Projects,
         Self::Dashboard,
+        Self::Review,
         Self::Shots,
         Self::Takes,
         Self::Queue,
         Self::Builds,
+        Self::Storage,
+        Self::History,
         Self::Diagnostics,
     ];
 
     #[must_use]
     pub const fn title(self) -> &'static str {
         match self {
+            Self::Projects => "Projects",
             Self::Dashboard => "Dashboard",
+            Self::Review => "Review",
             Self::Shots => "Shots",
             Self::Takes => "Takes",
             Self::Queue => "Queue",
             Self::Builds => "Builds",
+            Self::Storage => "Storage",
+            Self::History => "History",
             Self::Diagnostics => "Diagnostics",
         }
     }
 
     pub(crate) const fn index(self) -> usize {
         match self {
-            Self::Dashboard => 0,
-            Self::Shots => 1,
-            Self::Takes => 2,
-            Self::Queue => 3,
-            Self::Builds => 4,
-            Self::Diagnostics => 5,
+            Self::Projects => 0,
+            Self::Dashboard => 1,
+            Self::Review => 2,
+            Self::Shots => 3,
+            Self::Takes => 4,
+            Self::Queue => 5,
+            Self::Builds => 6,
+            Self::Storage => 7,
+            Self::History => 8,
+            Self::Diagnostics => 9,
         }
     }
 
@@ -89,9 +109,28 @@ pub struct Confirmation {
     pub command: WorkerCommand,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReviewChoice {
+    take_id: String,
+    included: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewRow {
+    pub shot_id: String,
+    pub take_ids: Vec<String>,
+    pub take_id: String,
+    pub included: bool,
+    pub warning_count: usize,
+}
+
 pub struct App<B> {
     backend: B,
     pub snapshot: Option<AppSnapshot>,
+    pub projects: Vec<ProjectListItem>,
+    pub storage_report: Option<StorageReport>,
+    pub cleanup_plan: Option<CleanupPlan>,
+    pub decisions: Vec<DecisionRecord>,
     pub connection: ConnectionState,
     pub page: Page,
     selections: [usize; Page::ALL.len()],
@@ -101,6 +140,8 @@ pub struct App<B> {
     pub show_help: bool,
     pub should_quit: bool,
     pending_artifact: Option<PathBuf>,
+    review_choices: BTreeMap<String, ReviewChoice>,
+    project_changed: bool,
     refresh_interval: Duration,
     next_refresh_at: Instant,
     reconnect_delay: Duration,
@@ -112,6 +153,10 @@ impl<B: TuiBackend> App<B> {
         Self {
             backend,
             snapshot: None,
+            projects: Vec::new(),
+            storage_report: None,
+            cleanup_plan: None,
+            decisions: Vec::new(),
             connection: ConnectionState::Disconnected("connecting".to_owned()),
             page: Page::Dashboard,
             selections: [0; Page::ALL.len()],
@@ -124,6 +169,8 @@ impl<B: TuiBackend> App<B> {
             show_help: false,
             should_quit: false,
             pending_artifact: None,
+            review_choices: BTreeMap::new(),
+            project_changed: false,
             refresh_interval,
             next_refresh_at: now,
             reconnect_delay: Duration::from_millis(500),
@@ -131,11 +178,30 @@ impl<B: TuiBackend> App<B> {
     }
 
     pub fn initial_refresh(&mut self) {
-        self.refresh(Instant::now());
+        let listed = self.refresh_projects();
+        if self.backend.selected_project_id().is_none()
+            && let Some(project_id) = self
+                .projects
+                .iter()
+                .find(|project| project.error.is_none())
+                .map(|project| project.id.clone())
+        {
+            self.select_project(&project_id);
+        } else if self.backend.selected_project_id().is_some() || !listed {
+            self.refresh(Instant::now());
+        } else {
+            self.page = Page::Projects;
+            self.connection = ConnectionState::Connected;
+            self.status = StatusMessage {
+                kind: StatusKind::Info,
+                text: "No projects available".to_owned(),
+            };
+        }
     }
 
     pub fn refresh_now(&mut self) {
         self.refresh(Instant::now());
+        self.refresh_page_data();
     }
 
     pub fn tick(&mut self, now: Instant) {
@@ -162,15 +228,16 @@ impl<B: TuiBackend> App<B> {
         match key.code {
             KeyCode::Char('q') => self.should_quit = true,
             KeyCode::Char('?') => self.show_help = true,
-            KeyCode::Char('g') => self.refresh(Instant::now()),
+            KeyCode::Char('g') => self.refresh_now(),
             KeyCode::Tab => self.switch_page(self.page.next()),
             KeyCode::BackTab => self.switch_page(self.page.previous()),
             KeyCode::Left if key.modifiers.is_empty() => self.switch_page(self.page.previous()),
             KeyCode::Right if key.modifiers.is_empty() => self.switch_page(self.page.next()),
-            KeyCode::Char(character @ '1'..='6') => {
+            KeyCode::Char(character @ '1'..='9') => {
                 let index = usize::from(character as u8 - b'1');
                 self.switch_page(Page::ALL[index]);
             }
+            KeyCode::Char('0') => self.switch_page(Page::Diagnostics),
             KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
             KeyCode::Enter => self.open_selected(),
@@ -196,6 +263,51 @@ impl<B: TuiBackend> App<B> {
             .as_ref()?
             .pending_approvals
             .get(self.selections[Page::Dashboard.index()])
+    }
+
+    #[must_use]
+    pub fn selected_project(&self) -> Option<&ProjectListItem> {
+        self.projects.get(self.selections[Page::Projects.index()])
+    }
+
+    #[must_use]
+    pub fn review_rows(&self) -> Vec<ReviewRow> {
+        let Some(snapshot) = &self.snapshot else {
+            return Vec::new();
+        };
+        snapshot
+            .pending_approvals
+            .iter()
+            .filter(|approval| approval.kind == "candidate_selection")
+            .filter_map(|approval| {
+                let shot_id = approval.shot_id.clone()?;
+                let choice = self.review_choices.get(&shot_id)?;
+                let warning_count = snapshot
+                    .takes
+                    .iter()
+                    .find(|take| take.take_id == choice.take_id)
+                    .map_or(0, |take| take.warnings.len());
+                Some(ReviewRow {
+                    shot_id,
+                    take_ids: approval.take_ids.clone(),
+                    take_id: choice.take_id.clone(),
+                    included: choice.included,
+                    warning_count,
+                })
+            })
+            .collect()
+    }
+
+    #[must_use]
+    pub fn selected_review_row(&self) -> Option<ReviewRow> {
+        self.review_rows()
+            .get(self.selections[Page::Review.index()])
+            .cloned()
+    }
+
+    #[must_use]
+    pub fn selected_decision(&self) -> Option<&DecisionRecord> {
+        self.decisions.get(self.selections[Page::History.index()])
     }
 
     #[must_use]
@@ -258,7 +370,20 @@ impl<B: TuiBackend> App<B> {
         self.pending_artifact.take()
     }
 
+    pub fn take_project_changed(&mut self) -> bool {
+        std::mem::take(&mut self.project_changed)
+    }
+
+    pub fn subscribe(&self) -> Option<super::backend::RevisionSubscription> {
+        self.backend.subscribe()
+    }
+
     fn refresh(&mut self, now: Instant) {
+        if self.backend.selected_project_id().is_none() && self.page == Page::Projects {
+            self.refresh_projects();
+            self.next_refresh_at = now + self.refresh_interval;
+            return;
+        }
         match self.backend.refresh() {
             Ok(snapshot) => {
                 self.apply_snapshot(snapshot);
@@ -292,6 +417,7 @@ impl<B: TuiBackend> App<B> {
         }) {
             self.selected_shot_id = snapshot.shots.first().map(|shot| shot.shot_id.clone());
         }
+        self.sync_review_choices(&snapshot);
         self.snapshot = Some(snapshot);
         self.clamp_all_selections();
     }
@@ -299,6 +425,7 @@ impl<B: TuiBackend> App<B> {
     fn switch_page(&mut self, page: Page) {
         self.page = page;
         self.clamp_selection(page);
+        self.refresh_page_data();
     }
 
     fn move_selection(&mut self, delta: isize) {
@@ -316,15 +443,22 @@ impl<B: TuiBackend> App<B> {
     }
 
     fn row_count(&self, page: Page) -> usize {
+        if page == Page::Projects {
+            return self.projects.len();
+        }
         let Some(snapshot) = &self.snapshot else {
             return 0;
         };
         match page {
+            Page::Projects => unreachable!("handled above"),
             Page::Dashboard => snapshot.pending_approvals.len(),
+            Page::Review => self.review_rows().len(),
             Page::Shots => snapshot.shots.len(),
             Page::Takes => self.visible_takes().len(),
             Page::Queue => snapshot.queue.jobs.len(),
             Page::Builds => snapshot.builds.len(),
+            Page::Storage => usize::from(self.storage_report.is_some()),
+            Page::History => self.decisions.len(),
             Page::Diagnostics => snapshot.diagnostics.len(),
         }
     }
@@ -347,6 +481,12 @@ impl<B: TuiBackend> App<B> {
 
     fn open_selected(&mut self) {
         match self.page {
+            Page::Projects => {
+                if let Some(project_id) = self.selected_project().map(|project| project.id.clone())
+                {
+                    self.select_project(&project_id);
+                }
+            }
             Page::Dashboard => {
                 if let Some(shot_id) = self
                     .selected_approval()
@@ -361,6 +501,11 @@ impl<B: TuiBackend> App<B> {
                 }
             }
             Page::Takes => self.preview_selected_take(),
+            Page::Review => {
+                if let Some(shot_id) = self.selected_review_row().map(|row| row.shot_id) {
+                    self.select_shot_and_open_takes(&shot_id);
+                }
+            }
             Page::Builds => self.open_selected_build(),
             _ => {}
         }
@@ -373,7 +518,13 @@ impl<B: TuiBackend> App<B> {
 
     fn handle_page_action(&mut self, character: char) {
         match (self.page, character) {
+            (Page::Projects, ' ') => self.confirm_project_toggle(),
             (Page::Dashboard, 'a') => self.confirm_selected_approval(),
+            (Page::Review, ' ') => self.toggle_review_row(),
+            (Page::Review, '[') => self.cycle_review_take(-1),
+            (Page::Review, ']') => self.cycle_review_take(1),
+            (Page::Review, 's') => self.confirm_batch_review(false),
+            (Page::Review, 'a') => self.confirm_batch_review(true),
             (Page::Shots, 'u') => self.confirm_shot_command("Start audition", |shot_id| {
                 WorkerCommand::AuditionShot { shot_id }
             }),
@@ -397,6 +548,14 @@ impl<B: TuiBackend> App<B> {
             (Page::Queue, 'x') => self.confirm_cancel_job(),
             (Page::Builds, 'b') => self.confirm_build(),
             (Page::Builds, 'o') => self.open_selected_build(),
+            (Page::Storage, 'p') => {
+                self.confirmation = Some(Confirmation {
+                    prompt: "Create cleanup plan from current stale/rejected media?".to_owned(),
+                    command: WorkerCommand::CreateCleanupPlan,
+                })
+            }
+            (Page::Storage, 'a') => self.confirm_cleanup_action(true),
+            (Page::Storage, 'r') => self.confirm_cleanup_action(false),
             (Page::Diagnostics, 'r') => self.confirm_retry_probe(),
             (Page::Diagnostics, 'l') => self.dispatch_read_only(WorkerCommand::OpenLogs),
             _ => {}
@@ -549,12 +708,23 @@ impl<B: TuiBackend> App<B> {
             return;
         };
 
+        let mutating = command.is_mutating();
+        let project_management = matches!(
+            command,
+            WorkerCommand::PauseProject | WorkerCommand::ResumeProject
+        );
         match self.backend.dispatch(command, revision) {
-            Ok(reply) => {
+            Ok(mut reply) => {
+                if let Some(payload) = reply.payload.take() {
+                    self.apply_payload(payload);
+                }
                 if let Some(snapshot) = reply.snapshot {
                     self.apply_snapshot(snapshot);
-                } else {
+                } else if mutating {
                     self.refresh(Instant::now());
+                }
+                if project_management {
+                    self.refresh_projects();
                 }
                 self.pending_artifact = reply.artifact_path;
                 self.status = StatusMessage {
@@ -607,109 +777,4 @@ impl<B: TuiBackend> App<B> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::tui::backend::BackendReply;
-    use crate::tui::protocol::{ProjectSummary, QueueSummary};
-    use crossterm::event::KeyModifiers;
-
-    #[derive(Default)]
-    struct FakeBackend {
-        snapshot: AppSnapshot,
-        dispatched: Vec<(WorkerCommand, u64)>,
-    }
-
-    impl TuiBackend for FakeBackend {
-        fn refresh(&mut self) -> Result<AppSnapshot, BackendError> {
-            Ok(self.snapshot.clone())
-        }
-
-        fn dispatch(
-            &mut self,
-            command: WorkerCommand,
-            expected_revision: u64,
-        ) -> Result<BackendReply, BackendError> {
-            self.dispatched.push((command, expected_revision));
-            Ok(BackendReply {
-                snapshot: Some(self.snapshot.clone()),
-                artifact_path: None,
-                message: Some("ok".to_owned()),
-            })
-        }
-    }
-
-    fn snapshot() -> AppSnapshot {
-        AppSnapshot {
-            schema_version: "1.0".to_owned(),
-            revision: 7,
-            refreshed_at: "2026-08-25T12:00:00Z".to_owned(),
-            project: ProjectSummary {
-                id: "rain-apartment".to_owned(),
-                title: "Rain Apartment".to_owned(),
-                stage: "shooting".to_owned(),
-                outcome: "needs_review".to_owned(),
-                work_mode: "director".to_owned(),
-                quality_target: "playable".to_owned(),
-            },
-            queue: QueueSummary::default(),
-            shots: vec![ShotSummary {
-                shot_id: "S01".to_owned(),
-                title: "Door".to_owned(),
-                stage: "candidates_ready".to_owned(),
-                risk: "high".to_owned(),
-                candidate_count: 1,
-                ..ShotSummary::default()
-            }],
-            takes: vec![TakeSummary {
-                take_id: "S01-T001".to_owned(),
-                shot_id: "S01".to_owned(),
-                status: "validated".to_owned(),
-                profile: "audition".to_owned(),
-                ..TakeSummary::default()
-            }],
-            ..AppSnapshot::default()
-        }
-    }
-
-    #[test]
-    fn shot_retry_requires_confirmation() {
-        let backend = FakeBackend {
-            snapshot: snapshot(),
-            ..FakeBackend::default()
-        };
-        let mut app = App::new(backend, Duration::from_secs(2));
-        app.initial_refresh();
-        app.switch_page(Page::Shots);
-
-        app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
-        assert!(app.confirmation.is_some());
-        app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
-        assert!(app.confirmation.is_none());
-        assert_eq!(app.status.kind, StatusKind::Success);
-        assert_eq!(
-            app.backend.dispatched,
-            vec![(
-                WorkerCommand::RetryShot {
-                    shot_id: "S01".to_owned(),
-                },
-                7,
-            )]
-        );
-    }
-
-    #[test]
-    fn enter_on_shot_opens_filtered_takes() {
-        let backend = FakeBackend {
-            snapshot: snapshot(),
-            ..FakeBackend::default()
-        };
-        let mut app = App::new(backend, Duration::from_secs(2));
-        app.initial_refresh();
-        app.switch_page(Page::Shots);
-
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(app.page, Page::Takes);
-        assert_eq!(app.selected_shot_id.as_deref(), Some("S01"));
-        assert_eq!(app.visible_takes().len(), 1);
-    }
-}
+mod tests;

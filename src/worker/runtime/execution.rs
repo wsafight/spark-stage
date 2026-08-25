@@ -84,7 +84,15 @@ impl WorkerRuntime {
             return Ok(None);
         }
         if self.queue.running.is_none() {
-            let Some(entry) = self.queue.pending.first().cloned() else {
+            let mut selected = None;
+            for (index, entry) in self.queue.pending.iter().enumerate() {
+                let store = ProjectStore::open(&self.paths.projects_dir, &entry.project_id)?;
+                if !store.read_state()?.paused {
+                    selected = Some((index, entry.clone()));
+                    break;
+                }
+            }
+            let Some((_index, entry)) = selected else {
                 return Ok(None);
             };
             let store = ProjectStore::open(&self.paths.projects_dir, &entry.project_id)?;

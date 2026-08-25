@@ -91,6 +91,30 @@ pub(super) fn execute_shots(args: ShotsArgs) -> Result<ExitCode, CliError> {
             IpcCommand::PreviewTake { take_id: take },
             json,
         ),
+        ShotsCommand::Review {
+            project,
+            file,
+            approve,
+            connection,
+            json,
+        } => {
+            let source = read_text(&file)?;
+            let selections = serde_json::from_str(&source).map_err(|error| {
+                CliError::InvalidInput(format!(
+                    "cannot decode review file `{}`: {error}",
+                    file.display()
+                ))
+            })?;
+            (
+                project,
+                connection,
+                IpcCommand::ReviewBatch {
+                    selections,
+                    approve,
+                },
+                json,
+            )
+        }
     };
     let client = WorkerClient::new(resolved_paths(&connection).socket, Some(project));
     let expected_revision = command

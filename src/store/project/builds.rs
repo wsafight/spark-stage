@@ -329,8 +329,9 @@ impl ProjectStore {
         }
         state.last_command_id = Some(command_id.to_owned());
         state.bump_revision(now.to_owned())?;
+        let decision = self.prepare_decision("build_approved", build_id, command_id, now)?;
         self.save_state(&state, expected_revision)?;
-        self.append_decision("build_approved", build_id, command_id, now)?;
+        self.commit_decisions(&[decision])?;
         Ok(state)
     }
 }

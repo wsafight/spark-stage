@@ -8,25 +8,39 @@ use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::ipc::{WorkerClient, WorkerCommand as IpcCommand, WorkerReply};
+use crate::ipc::{WorkerClient, WorkerCommand as IpcCommand, WorkerPayload, WorkerReply};
 use crate::paths::AppPaths;
 use crate::validation::{ValidationIssue, json_schema, validate_json};
 
+mod adapter;
+mod benchmark;
+mod budget;
 mod control;
 mod edit;
+mod history;
 mod output;
+mod project;
 mod shots;
+mod storage;
 
+use adapter::{AdapterArgs, execute_adapter};
+use benchmark::{BenchmarkArgs, execute_benchmark};
+use budget::{BudgetArgs, execute_budget};
 use control::{
     ApprovalArgs, DiagnosticsArgs, LogsArgs, QueueArgs, execute_approval, execute_diagnostics,
     execute_logs, execute_queue,
 };
 use edit::execute_edit;
+use history::{HistoryArgs, execute_history};
 use output::{print_reply, reply_exit_code};
+use project::{ProjectArgs, execute_project};
 use shots::execute_shots;
+use storage::{StorageArgs, execute_storage};
 
 #[cfg(test)]
 use edit::expand_shot_selection;
+#[cfg(test)]
+use project::ProjectSubcommand;
 
 const EXIT_ERROR: u8 = 1;
 const EXIT_INVALID: u8 = 2;
@@ -64,6 +78,16 @@ enum Command {
     Diagnostics(DiagnosticsArgs),
     /// Resolve project logs for inspection.
     Logs(LogsArgs),
+    /// Inspect project storage and apply recoverable cleanup plans.
+    Storage(StorageArgs),
+    /// Inspect append-only project decision history.
+    History(HistoryArgs),
+    /// Inspect or replace the persisted project budget contract.
+    Budget(BudgetArgs),
+    /// Prepare and inspect immutable MiniMax H3 benchmark records.
+    Benchmark(BenchmarkArgs),
+    /// Generate a disabled adapter config from explicit workflow bindings.
+    Adapter(AdapterArgs),
     /// Open the Ratatui production console connected to the worker.
     Tui(TuiArgs),
 }
@@ -112,42 +136,6 @@ enum WorkerSubcommand {
     },
     /// Check whether the worker is accepting commands.
     Status {
-        #[command(flatten)]
-        connection: ConnectionArgs,
-        /// Emit the stable worker reply envelope.
-        #[arg(long)]
-        json: bool,
-    },
-}
-
-#[derive(Debug, Args)]
-struct ProjectArgs {
-    #[command(subcommand)]
-    command: ProjectSubcommand,
-}
-
-#[derive(Debug, Subcommand)]
-enum ProjectSubcommand {
-    /// Create a project through the running worker.
-    New {
-        #[arg(long, value_name = "PATH")]
-        brief_file: PathBuf,
-        /// Stable lowercase project slug; defaults to the brief file stem.
-        #[arg(long, value_name = "PROJECT_ID")]
-        id: Option<String>,
-        /// Display title; defaults to the first non-empty brief line.
-        #[arg(long, value_name = "TITLE")]
-        title: Option<String>,
-        #[command(flatten)]
-        connection: ConnectionArgs,
-        /// Emit the stable worker reply envelope.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Read the latest project snapshot through the worker.
-    Status {
-        #[arg(long, value_name = "PROJECT_ID")]
-        project: Option<String>,
         #[command(flatten)]
         connection: ConnectionArgs,
         /// Emit the stable worker reply envelope.
@@ -315,6 +303,19 @@ enum ShotsCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Select multiple takes atomically, optionally approving them in the same revision.
+    Review {
+        #[arg(long, value_name = "PROJECT_ID")]
+        project: String,
+        #[arg(long, value_name = "PATH")]
+        file: PathBuf,
+        #[arg(long)]
+        approve: bool,
+        #[command(flatten)]
+        connection: ConnectionArgs,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -388,6 +389,12 @@ enum CliError {
     Worker(#[from] crate::worker::WorkerRunError),
     #[error(transparent)]
     Client(#[from] crate::ipc::ClientError),
+    #[error(transparent)]
+    Benchmark(#[from] crate::benchmark::BenchmarkError),
+    #[error(transparent)]
+    Adapter(#[from] crate::adapter::AdapterError),
+    #[error(transparent)]
+    Portability(#[from] crate::portability::PortabilityError),
     #[error("cannot initialize async runtime: {0}")]
     Runtime(#[from] io::Error),
     #[error("{0}")]
@@ -430,6 +437,11 @@ fn execute(cli: Cli) -> Result<ExitCode, CliError> {
         Command::Approval(args) => execute_approval(args),
         Command::Diagnostics(args) => execute_diagnostics(args),
         Command::Logs(args) => execute_logs(args),
+        Command::Storage(args) => execute_storage(args),
+        Command::History(args) => execute_history(args),
+        Command::Budget(args) => execute_budget(args),
+        Command::Benchmark(args) => execute_benchmark(args),
+        Command::Adapter(args) => execute_adapter(args),
         Command::Tui(args) => {
             crate::tui::run(crate::tui::TuiOptions {
                 socket: args.socket.unwrap_or_else(crate::tui::default_socket_path),
@@ -463,46 +475,6 @@ fn execute_worker(args: WorkerArgs) -> Result<ExitCode, CliError> {
         WorkerSubcommand::Status { connection, json } => {
             let client = WorkerClient::new(resolved_paths(&connection).socket, None);
             let reply = client.send(IpcCommand::Health, None)?;
-            print_reply(&reply, json)?;
-            Ok(reply_exit_code(&reply))
-        }
-    }
-}
-
-fn execute_project(args: ProjectArgs) -> Result<ExitCode, CliError> {
-    match args.command {
-        ProjectSubcommand::New {
-            brief_file,
-            id,
-            title,
-            connection,
-            json,
-        } => {
-            let brief = read_text(&brief_file)?;
-            let project_id = match id {
-                Some(id) => id,
-                None => infer_project_id(&brief_file)?,
-            };
-            let title = title.unwrap_or_else(|| infer_title(&brief, &project_id));
-            let client = WorkerClient::new(resolved_paths(&connection).socket, None);
-            let reply = client.send(
-                IpcCommand::CreateProject {
-                    project_id,
-                    title,
-                    brief,
-                },
-                None,
-            )?;
-            print_reply(&reply, json)?;
-            Ok(reply_exit_code(&reply))
-        }
-        ProjectSubcommand::Status {
-            project,
-            connection,
-            json,
-        } => {
-            let client = WorkerClient::new(resolved_paths(&connection).socket, project);
-            let reply = client.send(IpcCommand::Snapshot, None)?;
             print_reply(&reply, json)?;
             Ok(reply_exit_code(&reply))
         }

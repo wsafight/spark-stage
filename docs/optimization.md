@@ -1,7 +1,7 @@
 # SparkStage MiniMax H3 性能与质量优化验证计划
 
 **版本**：0.2<br>
-**日期**：2026-08-25<br>
+**日期**：2026-08-26<br>
 **状态**：待基线实测<br>
 **适用环境**：NVIDIA DGX Spark（GB10）+ 本机 MiniMax H3 + ComfyUI<br>
 **对应产品文档**：[product.md](product.md)
@@ -26,6 +26,8 @@
 6. **显存方案不冒充加速方案**：tiling 和 offload 首先解决可运行性，若墙钟变慢要如实记录。
 7. **优化绑定具体环境**：任何结论必须带 workflow hash、模型栈、节点版本、PyTorch、CUDA 和驱动信息。
 8. **benchmark 不绕过生产控制面**：所有实验通过 `sparkstage benchmark h3` 进入同一 worker、GPU 资源锁和 camera adapter；profiling 只增加观测，不复制投递与恢复实现。
+
+当前 P0 的 `init/record/show` 只管理不可变 run 元数据和已有生产 job 的样本导入，不会直接投递 ComfyUI。真实实验执行仍必须由 worker 取得 `gpu_benchmark` reservation 后调用生产 adapter；不能把离线 `record` 当成运行或验证证据。
 
 ## 3. 优先级
 

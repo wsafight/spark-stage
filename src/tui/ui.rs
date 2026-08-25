@@ -11,8 +11,12 @@ use ratatui::widgets::{
 use super::app::{App, ConnectionState, Page, StatusKind};
 use super::backend::TuiBackend;
 use super::protocol::{
-    ApprovalSummary, BuildSummary, DiagnosticSummary, QueueJobSummary, ShotSummary, TakeSummary,
+    ApprovalSummary, BuildSummary, DiagnosticSummary, ProjectListItem, QueueJobSummary,
+    ShotSummary, TakeSummary,
 };
+
+mod operations;
+use operations::{render_history, render_projects, render_review, render_storage};
 
 const WIDE_TERMINAL: u16 = 96;
 
@@ -76,7 +80,7 @@ fn render_header<B: TuiBackend>(frame: &mut Frame<'_>, area: Rect, app: &App<B>)
 
 fn render_navigation<B: TuiBackend>(frame: &mut Frame<'_>, area: Rect, app: &App<B>) {
     let mut spans = Vec::new();
-    if area.width >= 76 {
+    if area.width >= 150 {
         for (index, page) in Page::ALL.into_iter().enumerate() {
             if index > 0 {
                 spans.push(Span::raw("  "));
@@ -98,6 +102,10 @@ fn render_navigation<B: TuiBackend>(frame: &mut Frame<'_>, area: Rect, app: &App
 }
 
 fn render_body<B: TuiBackend>(frame: &mut Frame<'_>, area: Rect, app: &App<B>) {
+    if app.page == Page::Projects {
+        render_projects(frame, area, app);
+        return;
+    }
     if app.snapshot.is_none() {
         let detail = match &app.connection {
             ConnectionState::Connected => "Worker returned no snapshot".to_owned(),
@@ -117,11 +125,15 @@ fn render_body<B: TuiBackend>(frame: &mut Frame<'_>, area: Rect, app: &App<B>) {
     }
 
     match app.page {
+        Page::Projects => unreachable!("rendered above"),
         Page::Dashboard => render_dashboard(frame, area, app),
+        Page::Review => render_review(frame, area, app),
         Page::Shots => render_shots(frame, area, app),
         Page::Takes => render_takes(frame, area, app),
         Page::Queue => render_queue(frame, area, app),
         Page::Builds => render_builds(frame, area, app),
+        Page::Storage => render_storage(frame, area, app),
+        Page::History => render_history(frame, area, app),
         Page::Diagnostics => render_diagnostics(frame, area, app),
     }
 }
@@ -168,54 +180,8 @@ fn dashboard_details(
         field("Mode", &snapshot.project.work_mode),
         field("Target", &snapshot.project.quality_target),
         Line::raw(""),
-        section("GPU"),
-        field("Status", &snapshot.gpu.status),
-        field("Job", option_text(snapshot.gpu.job_id.as_deref())),
-        field("Shot", option_text(snapshot.gpu.shot_id.as_deref())),
-        field("Progress", &format_progress(snapshot.gpu.progress)),
-        field(
-            "ETA",
-            &format_seconds(snapshot.gpu.eta_seconds.unwrap_or(0)),
-        ),
-        Line::raw(""),
-        section("BUDGET"),
-        field("Elapsed", &format_seconds(snapshot.budget.elapsed_seconds)),
-        field(
-            "Remaining",
-            &format_seconds(snapshot.budget.estimated_remaining_seconds),
-        ),
-        field(
-            "Disk",
-            &format!(
-                "{} free / {} required",
-                format_bytes(snapshot.budget.disk_free_bytes),
-                format_bytes(snapshot.budget.disk_required_bytes)
-            ),
-        ),
-        field(
-            "Auditions",
-            &format!(
-                "{} / {}",
-                snapshot.budget.audition_takes_used, snapshot.budget.audition_takes_limit
-            ),
-        ),
-        Line::raw(""),
-        section("SELECTED APPROVAL"),
+        section("RECENT FAILURES"),
     ];
-    if let Some(approval) = approval {
-        lines.extend([
-            field("ID", &approval.approval_id),
-            field("Kind", &approval.kind),
-            field("Shot", option_text(approval.shot_id.as_deref())),
-            field("Takes", &list_text(&approval.take_ids)),
-            field("Blocking", yes_no(approval.blocking)),
-            field("Reason", &approval.description),
-        ]);
-    } else {
-        lines.push(Line::styled("No pending approval", MUTED));
-    }
-    lines.push(Line::raw(""));
-    lines.push(section("RECENT FAILURES"));
     if snapshot.recent_failures.is_empty() {
         lines.push(Line::styled("None", MUTED));
     } else {
@@ -229,6 +195,86 @@ fn dashboard_details(
                 failure.occurred_at, failure.message
             )));
         }
+    }
+    lines.extend([
+        Line::raw(""),
+        section("GPU"),
+        field("Status", &snapshot.gpu.status),
+        field("Job", option_text(snapshot.gpu.job_id.as_deref())),
+        field("Shot", option_text(snapshot.gpu.shot_id.as_deref())),
+        field("Progress", &format_progress(snapshot.gpu.progress)),
+        field(
+            "ETA",
+            &format_seconds(snapshot.gpu.eta_seconds.unwrap_or(0)),
+        ),
+        Line::raw(""),
+        section("BUDGET"),
+        field(
+            "Estimate",
+            if snapshot.budget.estimate_source.is_empty() {
+                "unknown"
+            } else {
+                &snapshot.budget.estimate_source
+            },
+        ),
+        field("Elapsed", &format_seconds(snapshot.budget.elapsed_seconds)),
+        field(
+            "Remaining",
+            &format_seconds(snapshot.budget.estimated_remaining_seconds),
+        ),
+        field(
+            "Projected / limit",
+            &format!(
+                "{} / {}",
+                format_seconds(snapshot.budget.estimated_total_seconds),
+                format_seconds(snapshot.budget.wall_clock_limit_seconds)
+            ),
+        ),
+        field(
+            "Disk",
+            &format!(
+                "{} free / {} output + {} floor",
+                format_bytes(snapshot.budget.disk_free_bytes),
+                format_bytes(snapshot.budget.disk_required_bytes),
+                format_bytes(snapshot.budget.minimum_disk_free_bytes)
+            ),
+        ),
+        field(
+            "Auditions",
+            &format!(
+                "{} / {}",
+                snapshot.budget.audition_takes_used, snapshot.budget.audition_takes_limit
+            ),
+        ),
+        field(
+            "Finals",
+            &format!(
+                "{} / {} planned",
+                snapshot.budget.final_takes_used, snapshot.budget.final_takes_limit
+            ),
+        ),
+        field(
+            "Gate",
+            if snapshot.budget.overrun_required {
+                "approval or disk action required"
+            } else {
+                "within current projection"
+            },
+        ),
+        Line::raw(""),
+        section("SELECTED APPROVAL"),
+    ]);
+    if let Some(approval) = approval {
+        lines.extend([
+            field("ID", &approval.approval_id),
+            field("Kind", &approval.kind),
+            field("Shot", option_text(approval.shot_id.as_deref())),
+            field("Takes", &list_text(&approval.take_ids)),
+            field("Blocking", yes_no(approval.blocking)),
+            field("Reason", &approval.description),
+        ]);
+    } else {
+        lines.push(Line::styled("No pending approval", MUTED));
     }
     lines
 }
@@ -600,11 +646,15 @@ fn render_details(frame: &mut Frame<'_>, area: Rect, title: &str, lines: Vec<Lin
 
 fn render_footer<B: TuiBackend>(frame: &mut Frame<'_>, area: Rect, app: &App<B>) {
     let actions = match app.page {
+        Page::Projects => "Enter open project | Space pause/resume current",
         Page::Dashboard => "a approve | Enter open shot",
+        Page::Review => "[/] choose take | Space include | s select batch | a approve batch",
         Page::Shots => "u audition | d direct render | r retry | Enter takes",
         Page::Takes => "s select | a approve | x reject | p/Enter preview",
         Page::Queue => "Space pause/resume | x cancel",
         Page::Builds => "b build/rebuild | o/Enter open",
+        Page::Storage => "p create plan | a apply | r restore",
+        Page::History => "g reload committed decisions",
         Page::Diagnostics => "r retry probe | l open logs",
     };
     let status_style = match app.status.kind {
@@ -634,16 +684,20 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
     frame.render_widget(Clear, popup);
     let help = Paragraph::new(vec![
         section("GLOBAL"),
-        Line::raw("1-6 page | Tab/Shift-Tab or Left/Right page"),
+        Line::raw("1-9/0 page | Tab/Shift-Tab or Left/Right page"),
         Line::raw("j/k or Down/Up select | Enter open | g refresh"),
         Line::raw("? or Esc close help | q quit"),
         Line::raw(""),
         section("ACTIONS"),
+        Line::raw("Projects: Enter open, Space pause/resume current"),
         Line::raw("Dashboard: a approve"),
+        Line::raw("Review: [/] take, Space include, s select, a approve"),
         Line::raw("Shots: u audition, d direct render, r retry"),
         Line::raw("Takes: s select, a approve, x reject, p preview"),
         Line::raw("Queue: Space pause/resume, x cancel"),
         Line::raw("Builds: b build/rebuild, o open"),
+        Line::raw("Storage: p plan, a apply, r restore"),
+        Line::raw("History: g reload"),
         Line::raw("Diagnostics: r retry probe, l open logs"),
         Line::raw(""),
         Line::styled(

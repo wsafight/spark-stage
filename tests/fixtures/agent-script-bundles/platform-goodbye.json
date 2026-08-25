@@ -1,0 +1,167 @@
+{
+  "schema_version": "1.0",
+  "project": {
+    "id": "platform-goodbye",
+    "title": "末班站台",
+    "logline": "末班车进站前，一对旧搭档用一把伞完成迟到的告别。",
+    "genre": "都市情感",
+    "language": "zh-CN",
+    "target_duration_seconds": 15,
+    "shot_count": 3,
+    "delivery": {"width": 960, "height": 544, "fps": 24},
+    "content_boundaries": ["角色均为虚构成年人", "无真实公众人物", "无伤害过程"]
+  },
+  "authoring": {
+    "skill": "screenwriter/v1",
+    "agent_host": "fixture-agent-alpha",
+    "model": "external-model-alpha"
+  },
+  "bible": {
+    "characters": [
+      {
+        "id": "chen",
+        "name": "陈澈",
+        "age": 36,
+        "fictional": true,
+        "appearance": "短发，戴细框眼镜，神情平静",
+        "wardrobe": "深蓝风衣，灰色围巾",
+        "personality": "习惯把重要的话留到最后"
+      },
+      {
+        "id": "xu",
+        "name": "许遥",
+        "age": 34,
+        "fictional": true,
+        "appearance": "齐肩黑发，目光坚定",
+        "wardrobe": "墨绿短外套，手持透明雨伞",
+        "personality": "做决定很快，告别时却会犹豫"
+      }
+    ],
+    "locations": [
+      {
+        "id": "night-platform",
+        "name": "夜间站台",
+        "description": "雨后的地面反射冷白灯，远处列车灯逐渐接近"
+      }
+    ],
+    "style": "现实主义都市短剧，冷色环境光，克制表演，稳定构图，画面内无文字"
+  },
+  "story": {
+    "synopsis": "许遥在末班车到来前归还共用的伞，陈澈终于承认自己一直在等这次告别。",
+    "beats": ["许遥把伞递给陈澈", "列车灯接近，两人短暂对视", "陈澈接过伞，许遥走向车门"]
+  },
+  "shots": [
+    {
+      "schema_version": "1.0",
+      "id": "S01",
+      "title": "归还雨伞",
+      "duration": 5,
+      "width": 960,
+      "height": 544,
+      "fps": 24,
+      "operation": "t2v",
+      "characters": ["chen", "xu"],
+      "location": "night-platform",
+      "camera": {
+        "shot_size": "medium",
+        "movement": "static",
+        "screen_direction": {"chen": "left", "xu": "right"}
+      },
+      "conditioning": null,
+      "continuity": {
+        "from": null,
+        "relation": "new_scene",
+        "handoff": "stable_frame",
+        "must_match": ["wardrobe", "location", "prop_state", "lighting"],
+        "state_in": {"chen.position": "pillar", "xu.position": "bench", "umbrella": "xu"},
+        "state_out": {"chen.position": "pillar", "xu.position": "pillar", "umbrella": "between"}
+      },
+      "generation_plan": {
+        "risk": "medium",
+        "audition_takes": 2,
+        "audition_profile": "audition",
+        "final_profile": "final",
+        "promotion": "manual"
+      },
+      "dialogue": [{"who": "xu", "text": "伞还你。"}],
+      "prompt": "雨后夜间站台，中景固定机位。许遥从右侧走近陈澈，把透明雨伞递到两人之间，保持服装、左右关系和冷白灯光，表演克制，画面内无文字。"
+    },
+    {
+      "schema_version": "1.0",
+      "id": "S02",
+      "title": "列车灯接近",
+      "duration": 5,
+      "width": 960,
+      "height": 544,
+      "fps": 24,
+      "operation": "i2v",
+      "characters": ["chen", "xu"],
+      "location": "night-platform",
+      "camera": {
+        "shot_size": "medium_close_up",
+        "movement": "slow_push",
+        "screen_direction": {"chen": "left", "xu": "right"}
+      },
+      "conditioning": {
+        "first_frame": "refs/shots/S02-start.png",
+        "reference_images": []
+      },
+      "continuity": {
+        "from": "S01",
+        "relation": "continuous",
+        "handoff": "approved_frame",
+        "must_match": ["wardrobe", "location", "prop_state", "lighting"],
+        "state_in": {"chen.position": "pillar", "xu.position": "pillar", "umbrella": "between"},
+        "state_out": {"chen.position": "pillar", "xu.position": "pillar", "umbrella": "chen"}
+      },
+      "generation_plan": {
+        "risk": "high",
+        "audition_takes": 3,
+        "audition_profile": "audition",
+        "final_profile": "final",
+        "promotion": "manual"
+      },
+      "dialogue": [{"who": "chen", "text": "我一直在等。"}],
+      "prompt": "延续上一镜站台状态，中近景缓慢推近。远处列车灯变亮，陈澈接住伞并看向许遥，许遥短暂停顿，保持人物身份、服装、站位和雨伞状态，画面内无文字。"
+    },
+    {
+      "schema_version": "1.0",
+      "id": "S03",
+      "title": "走向车门",
+      "duration": 5,
+      "width": 960,
+      "height": 544,
+      "fps": 24,
+      "operation": "flf2v",
+      "characters": ["chen", "xu"],
+      "location": "night-platform",
+      "camera": {
+        "shot_size": "wide",
+        "movement": "static",
+        "screen_direction": {"chen": "left", "xu": "right"}
+      },
+      "conditioning": {
+        "first_frame": "refs/shots/S03-start.png",
+        "last_frame": "refs/shots/S03-end.png",
+        "reference_images": []
+      },
+      "continuity": {
+        "from": "S02",
+        "relation": "continuous",
+        "handoff": "approved_frame",
+        "must_match": ["wardrobe", "location", "prop_state", "character_position"],
+        "state_in": {"chen.position": "pillar", "xu.position": "pillar", "umbrella": "chen"},
+        "state_out": {"chen.position": "pillar", "xu.position": "train-door", "umbrella": "chen"}
+      },
+      "generation_plan": {
+        "risk": "high",
+        "audition_takes": 3,
+        "audition_profile": "audition",
+        "final_profile": "final",
+        "promotion": "manual"
+      },
+      "dialogue": [],
+      "prompt": "延续站台与雨伞状态，广角固定机位。列车停稳后许遥从陈澈右侧走向车门，陈澈留在柱边握着透明雨伞，动作自然，保持服装和空间方向，画面内无文字。"
+    }
+  ]
+}

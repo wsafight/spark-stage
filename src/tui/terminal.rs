@@ -58,9 +58,10 @@ pub fn run(options: TuiOptions) -> Result<(), TuiError> {
 
 fn run_inner(options: TuiOptions) -> Result<(), TuiError> {
     let backend = UnixBackend::new(options.socket, options.project_id);
-    let revision_subscription = backend.subscribe();
     let mut app = App::new(backend, options.refresh_interval);
     app.initial_refresh();
+    let _ = app.take_project_changed();
+    let mut revision_subscription = app.subscribe();
 
     let mut session = TerminalSession::enter()?;
     let termination = TerminationSignals::install()?;
@@ -68,7 +69,10 @@ fn run_inner(options: TuiOptions) -> Result<(), TuiError> {
 
     while !app.should_quit && !termination.requested() {
         let now = Instant::now();
-        if revision_subscription.changed() {
+        if revision_subscription
+            .as_ref()
+            .is_some_and(super::backend::RevisionSubscription::changed)
+        {
             app.refresh_now();
         }
         app.tick(now);
@@ -88,6 +92,10 @@ fn run_inner(options: TuiOptions) -> Result<(), TuiError> {
             } else {
                 app.handle_key(key);
             }
+        }
+
+        if app.take_project_changed() {
+            revision_subscription = app.subscribe();
         }
 
         if let Some(path) = app.take_pending_artifact() {

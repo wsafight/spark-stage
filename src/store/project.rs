@@ -15,10 +15,14 @@ use crate::domain::{
     TakeMetadata,
 };
 
+mod budget;
 mod builds;
 mod decisions;
+mod storage;
 mod support;
 
+pub use decisions::{BatchTakeSelection, DecisionRecord};
+pub use storage::*;
 pub use support::validate_project_id;
 use support::*;
 
@@ -133,7 +137,9 @@ impl ProjectStore {
         state: &ProjectState,
         expected_revision: u64,
     ) -> Result<(), StoreError> {
-        let current = self.read_state()?;
+        let mut current = self.read_state()?;
+        self.recover_cleanup_plans_for_state(&mut current)?;
+        self.recover_decisions_for_state(&current)?;
         if current.revision != expected_revision {
             return Err(StoreError::RevisionConflict {
                 expected: expected_revision,
@@ -369,13 +375,14 @@ impl ProjectStore {
         state.project_stage = ProjectStage::Shooting;
         state.last_command_id = Some(command_id.to_owned());
         state.bump_revision(now.to_owned())?;
-        self.save_state(&state, expected_revision)?;
-        self.append_decision(
+        let decision = self.prepare_decision(
             "script_bundle_approved",
             &approval.approval_id,
             command_id,
             now,
         )?;
+        self.save_state(&state, expected_revision)?;
+        self.commit_decisions(&[decision])?;
         self.write_active_contract_pointer(&state, &contract_id)?;
         Ok(state)
     }
@@ -762,25 +769,6 @@ impl ProjectStore {
             &self.root.join("events.jsonl"),
             &JournalEntry {
                 event_id: format!("EVT-{}", Ulid::new()),
-                kind,
-                subject_id,
-                command_id,
-                occurred_at: now,
-            },
-        )
-    }
-
-    fn append_decision(
-        &self,
-        kind: &str,
-        subject_id: &str,
-        command_id: &str,
-        now: &str,
-    ) -> Result<(), StoreError> {
-        append_jsonl(
-            &self.root.join("decisions.jsonl"),
-            &JournalEntry {
-                event_id: format!("DEC-{}", Ulid::new()),
                 kind,
                 subject_id,
                 command_id,

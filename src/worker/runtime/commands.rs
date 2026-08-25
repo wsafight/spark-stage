@@ -1,13 +1,19 @@
 use super::*;
 
 mod approvals;
+mod budget;
 mod cancellation;
 mod diagnostics;
+mod history;
+mod projects;
+mod review;
+mod storage;
 
 impl WorkerRuntime {
     pub(super) fn execute(&mut self, request: &ClientRequest) -> WorkerReply {
         match &request.command {
             WorkerCommand::Health => success(request, None, None, "worker is ready"),
+            WorkerCommand::ListProjects => self.list_projects(request),
             WorkerCommand::Snapshot | WorkerCommand::Subscribe { .. } => {
                 match self.snapshot_for(request.project_id.as_deref()) {
                     Ok(snapshot) => success(
@@ -24,6 +30,24 @@ impl WorkerRuntime {
                 title,
                 brief,
             } => self.create_project(request, project_id, title, brief),
+            WorkerCommand::PauseProject => self.set_project_paused(request, true),
+            WorkerCommand::ResumeProject => self.set_project_paused(request, false),
+            WorkerCommand::UpdateBudget { contract } => {
+                self.update_budget(request, contract.clone())
+            }
+            WorkerCommand::StorageStatus => self.storage_status(request),
+            WorkerCommand::CreateCleanupPlan => self.create_cleanup_plan(request),
+            WorkerCommand::ApplyCleanupPlan { plan_id } => {
+                self.apply_cleanup_plan(request, plan_id)
+            }
+            WorkerCommand::RestoreCleanupPlan { plan_id } => {
+                self.restore_cleanup_plan(request, plan_id)
+            }
+            WorkerCommand::ReviewBatch {
+                selections,
+                approve,
+            } => self.review_batch(request, selections, *approve),
+            WorkerCommand::DecisionHistory { limit } => self.decision_history(request, *limit),
             WorkerCommand::ApplyScript { bundle_json } => self.apply_script(request, bundle_json),
             WorkerCommand::ApproveScript => self.approve_script(request, None),
             WorkerCommand::Approve { approval_id } => self.approve(request, approval_id),
@@ -69,6 +93,15 @@ impl WorkerRuntime {
                     expected: expected_revision,
                     actual: state.revision,
                 },
+            );
+        }
+        if state.paused {
+            return failure(
+                request,
+                "PROJECT_PAUSED",
+                "resume the project before starting a build".to_owned(),
+                false,
+                Some(state.revision),
             );
         }
         if let Some(approval) = state
@@ -287,6 +320,7 @@ impl WorkerRuntime {
             ok: true,
             revision: Some(state.revision),
             snapshot: None,
+            payload: None,
             artifact_path: Some(output),
             message: Some("build output ready".to_owned()),
             error: None,
@@ -519,6 +553,15 @@ impl WorkerRuntime {
                 },
             );
         }
+        if state.paused {
+            return failure(
+                request,
+                "PROJECT_PAUSED",
+                "resume the project before queuing camera work".to_owned(),
+                false,
+                Some(state.revision),
+            );
+        }
         let blocking_approval = state.pending_approvals.iter().find(|approval| {
             if !approval.blocking {
                 return false;
@@ -590,6 +633,60 @@ impl WorkerRuntime {
                     Some(state.revision),
                 );
             }
+        }
+        match super::budget::assess_generation(&store, &state, &bundle, shot, profile, audition) {
+            Ok(super::budget::GenerationBudgetGate::Allowed) => {}
+            Ok(super::budget::GenerationBudgetGate::DiskBlocked {
+                available_bytes,
+                required_bytes,
+            }) => {
+                return failure(
+                    request,
+                    "DISK_BUDGET_EXCEEDED",
+                    format!(
+                        "generation requires {required_bytes} bytes free including the safety floor; only {available_bytes} bytes are available"
+                    ),
+                    false,
+                    Some(state.revision),
+                );
+            }
+            Ok(super::budget::GenerationBudgetGate::ApprovalRequired {
+                scope,
+                dimensions,
+                reasons,
+                incremental_wall_seconds,
+                incremental_disk_bytes,
+            }) => {
+                let operation = if audition { "audition" } else { "final" };
+                let (state, approval) = match store.request_budget_overrun(
+                    &scope,
+                    shot_id,
+                    operation,
+                    dimensions,
+                    reasons,
+                    incremental_wall_seconds,
+                    incremental_disk_bytes,
+                    expected_revision,
+                    &request.command_id,
+                    &timestamp(),
+                ) {
+                    Ok(result) => result,
+                    Err(error) => return store_failure(request, error),
+                };
+                return match self.snapshot(&store, state) {
+                    Ok(snapshot) => success(
+                        request,
+                        Some(snapshot.revision),
+                        Some(snapshot),
+                        &format!(
+                            "budget approval {} is required before {operation} generation",
+                            approval.approval_id
+                        ),
+                    ),
+                    Err(error) => worker_failure(request, error),
+                };
+            }
+            Err(error) => return store_failure(request, error),
         }
         let adapter_fingerprint = match self.adapter_fingerprint(shot.operation, profile) {
             Ok(fingerprint) => fingerprint,
@@ -734,167 +831,6 @@ impl WorkerRuntime {
                 },
             ),
             Err(error) => worker_failure(request, error),
-        }
-    }
-
-    fn mutate_take(
-        &mut self,
-        request: &ClientRequest,
-        shot_id: &str,
-        take_id: &str,
-        mutation: TakeMutation,
-    ) -> WorkerReply {
-        let Some(expected_revision) = request.expected_revision else {
-            return missing_revision(request);
-        };
-        let store = match self.project_store(request.project_id.as_deref()) {
-            Ok(store) => store,
-            Err(error) => return worker_failure(request, error),
-        };
-        let now = timestamp();
-        let result = match mutation {
-            TakeMutation::Select => store.select_take(
-                shot_id,
-                take_id,
-                expected_revision,
-                &request.command_id,
-                &now,
-            ),
-            TakeMutation::Approve => store.approve_take(
-                shot_id,
-                take_id,
-                expected_revision,
-                &request.command_id,
-                &now,
-            ),
-            TakeMutation::Reject => store.reject_take(
-                shot_id,
-                take_id,
-                expected_revision,
-                &request.command_id,
-                &now,
-            ),
-        };
-        match result {
-            Ok(state) => match self.snapshot(&store, state) {
-                Ok(snapshot) => success(
-                    request,
-                    Some(snapshot.revision),
-                    Some(snapshot),
-                    mutation.message(),
-                ),
-                Err(error) => worker_failure(request, error),
-            },
-            Err(error) => store_failure(request, error),
-        }
-    }
-
-    fn retry_shot(&mut self, request: &ClientRequest, shot_id: &str) -> WorkerReply {
-        let Some(expected_revision) = request.expected_revision else {
-            return missing_revision(request);
-        };
-        let store = match self.project_store(request.project_id.as_deref()) {
-            Ok(store) => store,
-            Err(error) => return worker_failure(request, error),
-        };
-        let state = match store.read_state() {
-            Ok(state) => state,
-            Err(error) => return store_failure(request, error),
-        };
-        if state.revision != expected_revision {
-            return store_failure(
-                request,
-                StoreError::RevisionConflict {
-                    expected: expected_revision,
-                    actual: state.revision,
-                },
-            );
-        }
-        let Some(shot) = state.shots.get(shot_id) else {
-            return failure(
-                request,
-                "SHOT_NOT_FOUND",
-                format!("shot `{shot_id}` is missing from the active contract"),
-                false,
-                Some(state.revision),
-            );
-        };
-        if let Some(job_id) = &shot.active_job_id {
-            return store_failure(
-                request,
-                StoreError::ShotBusy {
-                    shot_id: shot_id.to_owned(),
-                    job_id: job_id.clone(),
-                },
-            );
-        }
-        if shot.approved_take_id.is_some() {
-            return store_failure(request, StoreError::ShotAlreadyApproved(shot_id.to_owned()));
-        }
-        if !matches!(shot.stage, ShotStage::Pending | ShotStage::Failed) {
-            return failure(
-                request,
-                "SHOT_NOT_RETRYABLE",
-                format!(
-                    "shot `{shot_id}` is `{}`; retry requires pending or failed",
-                    shot_stage(shot.stage)
-                ),
-                false,
-                Some(state.revision),
-            );
-        }
-        let audition = shot.selected_candidate_take_id.is_none();
-        self.enqueue_shot(request, shot_id, audition)
-    }
-
-    fn preview_take(&self, request: &ClientRequest, take_id: &str) -> WorkerReply {
-        let store = match self.project_store(request.project_id.as_deref()) {
-            Ok(store) => store,
-            Err(error) => return worker_failure(request, error),
-        };
-        let state = match store.read_state() {
-            Ok(state) => state,
-            Err(error) => return store_failure(request, error),
-        };
-        let Some(take) = state.takes.get(take_id) else {
-            return store_failure(request, StoreError::TakeNotFound(take_id.to_owned()));
-        };
-        if take.media_path.is_absolute()
-            || take
-                .media_path
-                .components()
-                .any(|component| !matches!(component, Component::Normal(_) | Component::CurDir))
-        {
-            return failure(
-                request,
-                "ARTIFACT_PATH_INVALID",
-                format!("take `{take_id}` has an unsafe media path"),
-                false,
-                Some(state.revision),
-            );
-        }
-        let media_path = store.root().join(&take.media_path);
-        if !media_path.is_file() {
-            return failure(
-                request,
-                "ARTIFACT_NOT_FOUND",
-                format!(
-                    "take `{take_id}` media is missing at {}",
-                    media_path.display()
-                ),
-                false,
-                Some(state.revision),
-            );
-        }
-        WorkerReply {
-            protocol_version: IPC_PROTOCOL_VERSION.to_owned(),
-            command_id: request.command_id.clone(),
-            ok: true,
-            revision: Some(state.revision),
-            snapshot: None,
-            artifact_path: Some(media_path),
-            message: Some("take preview ready".to_owned()),
-            error: None,
         }
     }
 }

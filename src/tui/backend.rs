@@ -9,8 +9,8 @@ use std::time::Duration;
 
 pub use crate::ipc::ClientError as BackendError;
 use crate::ipc::{
-    ClientRequest, IPC_PROTOCOL_VERSION, RevisionEvent, WorkerClient, WorkerReply, read_frame,
-    write_frame,
+    ClientRequest, IPC_PROTOCOL_VERSION, ProjectListItem, RevisionEvent, WorkerClient,
+    WorkerPayload, WorkerReply, read_frame, write_frame,
 };
 use ulid::Ulid;
 
@@ -19,12 +19,29 @@ use super::protocol::{AppSnapshot, WorkerCommand};
 #[derive(Debug, Clone)]
 pub struct BackendReply {
     pub snapshot: Option<AppSnapshot>,
+    pub payload: Option<WorkerPayload>,
     pub artifact_path: Option<PathBuf>,
     pub message: Option<String>,
 }
 
 pub trait TuiBackend {
     fn refresh(&mut self) -> Result<AppSnapshot, BackendError>;
+    fn list_projects(&mut self) -> Result<Vec<ProjectListItem>, BackendError> {
+        Err(BackendError::Protocol(
+            "project listing is unavailable in this backend".to_owned(),
+        ))
+    }
+    fn select_project(&mut self, _project_id: &str) -> Result<AppSnapshot, BackendError> {
+        Err(BackendError::Protocol(
+            "project selection is unavailable in this backend".to_owned(),
+        ))
+    }
+    fn selected_project_id(&self) -> Option<&str> {
+        None
+    }
+    fn subscribe(&self) -> Option<RevisionSubscription> {
+        None
+    }
     fn dispatch(
         &mut self,
         command: WorkerCommand,
@@ -34,6 +51,7 @@ pub trait TuiBackend {
 
 #[derive(Debug)]
 pub struct UnixBackend {
+    socket: PathBuf,
     client: WorkerClient,
 }
 
@@ -41,7 +59,8 @@ impl UnixBackend {
     #[must_use]
     pub fn new(socket: PathBuf, project_id: Option<String>) -> Self {
         Self {
-            client: WorkerClient::new(socket, project_id),
+            client: WorkerClient::new(socket.clone(), project_id),
+            socket,
         }
     }
 
@@ -218,14 +237,40 @@ impl TuiBackend for UnixBackend {
             .ok_or(BackendError::MissingSnapshot)
     }
 
+    fn list_projects(&mut self) -> Result<Vec<ProjectListItem>, BackendError> {
+        let reply =
+            WorkerClient::new(self.socket.clone(), None).send(WorkerCommand::ListProjects, None)?;
+        match reply.payload {
+            Some(WorkerPayload::ProjectList { projects }) => Ok(projects),
+            _ => Err(BackendError::Protocol(
+                "project list reply did not include a project list".to_owned(),
+            )),
+        }
+    }
+
+    fn select_project(&mut self, project_id: &str) -> Result<AppSnapshot, BackendError> {
+        self.client = WorkerClient::new(self.socket.clone(), Some(project_id.to_owned()));
+        self.refresh()
+    }
+
+    fn selected_project_id(&self) -> Option<&str> {
+        self.client.project_id()
+    }
+
+    fn subscribe(&self) -> Option<RevisionSubscription> {
+        Some(UnixBackend::subscribe(self))
+    }
+
     fn dispatch(
         &mut self,
         command: WorkerCommand,
         expected_revision: u64,
     ) -> Result<BackendReply, BackendError> {
-        let reply = self.client.send(command, Some(expected_revision))?;
+        let revision = command.is_mutating().then_some(expected_revision);
+        let reply = self.client.send(command, revision)?;
         Ok(BackendReply {
             snapshot: reply.snapshot,
+            payload: reply.payload,
             artifact_path: reply.artifact_path,
             message: reply.message,
         })
@@ -256,6 +301,7 @@ mod tests {
                 outcome: "needs_review".to_owned(),
                 work_mode: "director".to_owned(),
                 quality_target: "playable".to_owned(),
+                paused: false,
             },
             queue: crate::ipc::QueueSummary {
                 revision: 7,
@@ -293,6 +339,7 @@ mod tests {
                 ok: true,
                 revision: Some(snapshot.revision),
                 snapshot: Some(snapshot.clone()),
+                payload: None,
                 artifact_path: None,
                 message: None,
                 error: None,
@@ -322,6 +369,7 @@ mod tests {
                 ok: false,
                 revision: Some(12),
                 snapshot: None,
+                payload: None,
                 artifact_path: None,
                 message: None,
                 error: Some(WorkerError {
@@ -355,6 +403,42 @@ mod tests {
     }
 
     #[test]
+    fn read_only_payload_command_omits_expected_revision() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("worker.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let report = crate::store::StorageReport {
+            project_id: "rain-apartment".to_owned(),
+            total_bytes: 100,
+            trash_bytes: 20,
+            reclaimable_bytes: 10,
+            reclaimable_files: 1,
+        };
+        let worker = spawn_worker(
+            listener,
+            WorkerReply {
+                protocol_version: IPC_PROTOCOL_VERSION.to_owned(),
+                command_id: String::new(),
+                ok: true,
+                revision: Some(11),
+                snapshot: None,
+                payload: Some(WorkerPayload::StorageReport(report.clone())),
+                artifact_path: None,
+                message: Some("loaded".to_owned()),
+                error: None,
+            },
+        );
+        let mut backend = UnixBackend::new(socket, Some("rain-apartment".to_owned()));
+
+        let reply = backend.dispatch(WorkerCommand::StorageStatus, 11).unwrap();
+
+        assert_eq!(reply.payload, Some(WorkerPayload::StorageReport(report)));
+        let request = worker.join().unwrap();
+        assert_eq!(request.expected_revision, None);
+        assert_eq!(request.command, WorkerCommand::StorageStatus);
+    }
+
+    #[test]
     fn revision_subscription_handshake_wakes_the_tui() {
         let directory = tempfile::tempdir().unwrap();
         let socket = directory.path().join("worker.sock");
@@ -368,6 +452,7 @@ mod tests {
                 ok: true,
                 revision: Some(snapshot.revision),
                 snapshot: Some(snapshot),
+                payload: None,
                 artifact_path: None,
                 message: Some("subscribed".to_owned()),
                 error: None,

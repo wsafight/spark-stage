@@ -60,13 +60,23 @@ impl WorkerRuntime {
                 false,
                 Some(state.revision),
             ),
-            ApprovalKind::BudgetOverrun => failure(
-                request,
-                "APPROVAL_NOT_IMPLEMENTED",
-                "budget-overrun approval is not implemented yet".to_owned(),
-                false,
-                Some(state.revision),
-            ),
+            ApprovalKind::BudgetOverrun => match store.approve_budget_overrun(
+                approval_id,
+                expected_revision,
+                &request.command_id,
+                &timestamp(),
+            ) {
+                Ok(state) => match self.snapshot(&store, state) {
+                    Ok(snapshot) => success(
+                        request,
+                        Some(snapshot.revision),
+                        Some(snapshot),
+                        "budget overrun approved; retry the blocked operation",
+                    ),
+                    Err(error) => worker_failure(request, error),
+                },
+                Err(error) => store_failure(request, error),
+            },
         }
     }
 }

@@ -12,6 +12,26 @@ pub(super) fn success(
         ok: true,
         revision,
         snapshot,
+        payload: None,
+        artifact_path: None,
+        message: Some(message.to_owned()),
+        error: None,
+    }
+}
+
+pub(super) fn success_payload(
+    request: &ClientRequest,
+    revision: Option<u64>,
+    payload: WorkerPayload,
+    message: &str,
+) -> WorkerReply {
+    WorkerReply {
+        protocol_version: IPC_PROTOCOL_VERSION.to_owned(),
+        command_id: request.command_id.clone(),
+        ok: true,
+        revision,
+        snapshot: None,
+        payload: Some(payload),
         artifact_path: None,
         message: Some(message.to_owned()),
         error: None,
@@ -31,6 +51,7 @@ pub(super) fn failure(
         ok: false,
         revision,
         snapshot: None,
+        payload: None,
         artifact_path: None,
         message: None,
         error: Some(WorkerError {
@@ -135,6 +156,55 @@ pub(super) fn store_failure(request: &ClientRequest, error: StoreError) -> Worke
         StoreError::TakeUnavailable(_) => {
             failure(request, "TAKE_UNAVAILABLE", error.to_string(), false, None)
         }
+        StoreError::InvalidReviewBatch(_) => failure(
+            request,
+            "REVIEW_BATCH_INVALID",
+            error.to_string(),
+            false,
+            None,
+        ),
+        StoreError::ReviewWarningsNotAccepted(_) => failure(
+            request,
+            "REVIEW_WARNINGS_NOT_ACCEPTED",
+            error.to_string(),
+            false,
+            None,
+        ),
+        StoreError::InvalidHistoryLimit(_) => failure(
+            request,
+            "HISTORY_LIMIT_INVALID",
+            error.to_string(),
+            false,
+            None,
+        ),
+        StoreError::CleanupPlanNotFound(_) => failure(
+            request,
+            "CLEANUP_PLAN_NOT_FOUND",
+            error.to_string(),
+            false,
+            None,
+        ),
+        StoreError::InvalidCleanupPlan(_) => failure(
+            request,
+            "INVALID_CLEANUP_PLAN",
+            error.to_string(),
+            false,
+            None,
+        ),
+        StoreError::CleanupPlanStale(_) => failure(
+            request,
+            "CLEANUP_PLAN_STALE",
+            error.to_string(),
+            false,
+            None,
+        ),
+        StoreError::CleanupPathConflict(_) => failure(
+            request,
+            "CLEANUP_PATH_CONFLICT",
+            error.to_string(),
+            false,
+            None,
+        ),
         _ => failure(request, "STORE_ERROR", error.to_string(), false, None),
     }
 }
@@ -190,9 +260,19 @@ pub(super) const fn operation_bindings(operation: Operation) -> &'static [&'stat
 pub(super) const fn command_kind(command: &WorkerCommand) -> &'static str {
     match command {
         WorkerCommand::Health => "health",
+        WorkerCommand::ListProjects => "project.list",
         WorkerCommand::Snapshot => "snapshot",
         WorkerCommand::Subscribe { .. } => "revision.subscribe",
         WorkerCommand::CreateProject { .. } => "project.create",
+        WorkerCommand::PauseProject => "project.pause",
+        WorkerCommand::ResumeProject => "project.resume",
+        WorkerCommand::UpdateBudget { .. } => "budget.update",
+        WorkerCommand::StorageStatus => "storage.status",
+        WorkerCommand::CreateCleanupPlan => "storage.plan",
+        WorkerCommand::ApplyCleanupPlan { .. } => "storage.apply",
+        WorkerCommand::RestoreCleanupPlan { .. } => "storage.restore",
+        WorkerCommand::ReviewBatch { .. } => "take.review_batch",
+        WorkerCommand::DecisionHistory { .. } => "history.decisions",
         WorkerCommand::ApplyScript { .. } => "script.apply",
         WorkerCommand::ApproveScript => "script.approve",
         WorkerCommand::Approve { .. } => "approval.approve",

@@ -191,6 +191,7 @@ mod tests {
             ok: true,
             revision: Some(revision),
             snapshot: None,
+            payload: None,
             artifact_path: None,
             message: None,
             error: None,

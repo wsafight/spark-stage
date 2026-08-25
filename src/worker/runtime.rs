@@ -20,10 +20,10 @@ use crate::domain::{
     QueueEntry, QueueState, Risk, ShotStage, TakeMetadata, WorkMode,
 };
 use crate::ipc::{
-    AppSnapshot, ApprovalSummary, BudgetSummary, BuildSummary, ClientRequest, DiagnosticSummary,
-    FailureSummary, GpuSummary, IPC_PROTOCOL_VERSION, ProjectSummary, QueueJobSummary,
-    QueueSummary, RevisionEvent, ShotSummary, TakeSummary, WorkerCommand, WorkerError, WorkerReply,
-    read_frame, write_frame,
+    AppSnapshot, ApprovalSummary, BuildSummary, ClientRequest, DiagnosticSummary, FailureSummary,
+    GpuSummary, IPC_PROTOCOL_VERSION, ProjectListItem, ProjectSummary, QueueJobSummary,
+    QueueSummary, RevisionEvent, ShotSummary, TakeSummary, WorkerCommand, WorkerError,
+    WorkerPayload, WorkerReply, read_frame, write_frame,
 };
 use crate::paths::AppPaths;
 use crate::store::{
@@ -37,6 +37,7 @@ use super::executor::{
 };
 
 mod auditions;
+mod budget;
 mod builds;
 mod commands;
 mod execution;
@@ -328,6 +329,8 @@ impl WorkerRuntime {
             let Ok(store) = ProjectStore::open(&self.paths.projects_dir, &project_id) else {
                 continue;
             };
+            store.recover_cleanup_plans()?;
+            store.recover_decision_journal()?;
             self.recover_terminal_jobs(&store)?;
             let state = store.read_state()?;
             for job_id in state

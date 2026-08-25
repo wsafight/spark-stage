@@ -1,0 +1,32 @@
+{
+  "schema_version": "1.0",
+  "cases": [
+    {
+      "bundle": "tests/fixtures/agent-script-bundles/platform-goodbye.json",
+      "valid": true,
+      "project_id": "platform-goodbye",
+      "shots": 3,
+      "duration_seconds": 15,
+      "agent_host": "fixture-agent-alpha",
+      "issue_codes": []
+    },
+    {
+      "bundle": "tests/fixtures/agent-script-bundles/watch-repair.json",
+      "valid": true,
+      "project_id": "watch-repair",
+      "shots": 2,
+      "duration_seconds": 12,
+      "agent_host": "fixture-agent-beta",
+      "issue_codes": []
+    },
+    {
+      "bundle": "skills/screenwriter/examples/invalid-workflow-field.json",
+      "valid": false,
+      "project_id": null,
+      "shots": null,
+      "duration_seconds": null,
+      "agent_host": null,
+      "issue_codes": ["JSON_CONTRACT"]
+    }
+  ]
+}

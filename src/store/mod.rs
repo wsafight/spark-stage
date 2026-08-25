@@ -72,6 +72,20 @@ pub enum StoreError {
     ShotAlreadyApproved(String),
     #[error("take `{0}` cannot be selected or approved for this shot")]
     TakeUnavailable(String),
+    #[error("review batch is invalid: {0}")]
+    InvalidReviewBatch(String),
+    #[error("take `{0}` has warnings that were not accepted")]
+    ReviewWarningsNotAccepted(String),
+    #[error("decision history limit must be between 1 and 1000, got {0}")]
+    InvalidHistoryLimit(u32),
+    #[error("cleanup plan `{0}` does not exist")]
+    CleanupPlanNotFound(String),
+    #[error("cleanup plan is invalid: {0}")]
+    InvalidCleanupPlan(String),
+    #[error("cleanup plan `{0}` is stale; create a new plan")]
+    CleanupPlanStale(String),
+    #[error("cleanup path conflict at `{0}`")]
+    CleanupPathConflict(PathBuf),
 }
 
 pub(crate) fn io_error(path: impl Into<PathBuf>, source: std::io::Error) -> StoreError {

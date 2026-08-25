@@ -1,0 +1,118 @@
+{
+  "schema_version": "1.0",
+  "project": {
+    "id": "watch-repair",
+    "title": "停住的秒针",
+    "logline": "钟表匠修好客人的旧表，也决定重新打开停业已久的店门。",
+    "genre": "生活剧情",
+    "language": "zh-CN",
+    "target_duration_seconds": 12,
+    "shot_count": 2,
+    "delivery": {"width": 768, "height": 432, "fps": 24},
+    "content_boundaries": ["角色为虚构成年人", "无真实品牌标识", "无危险操作"]
+  },
+  "authoring": {
+    "skill": "screenwriter/v1",
+    "agent_host": "fixture-agent-beta",
+    "model": "external-model-beta"
+  },
+  "bible": {
+    "characters": [
+      {
+        "id": "fang",
+        "name": "方砚",
+        "age": 48,
+        "fictional": true,
+        "appearance": "黑发夹灰，戴圆框放大镜，双手沉稳",
+        "wardrobe": "白色衬衫，深棕工作围裙，无标识",
+        "personality": "耐心寡言，通过修理物件整理情绪"
+      }
+    ],
+    "locations": [
+      {
+        "id": "watch-shop",
+        "name": "旧钟表店",
+        "description": "木质工作台摆放精细工具，墙上挂钟停在不同时间，晨光从百叶窗进入"
+      }
+    ],
+    "style": "安静的手工艺观察，暖木色与自然晨光，微距细节清晰，不出现品牌和画面文字"
+  },
+  "story": {
+    "synopsis": "方砚在晨光里装回最后一枚齿轮，秒针重新移动，他随后把门口的停业牌收进抽屉。",
+    "beats": ["方砚校准旧表机芯", "秒针重新转动", "方砚收起停业牌并打开店门"]
+  },
+  "shots": [
+    {
+      "schema_version": "1.0",
+      "id": "S01",
+      "title": "秒针重新移动",
+      "duration": 6,
+      "width": 768,
+      "height": 432,
+      "fps": 24,
+      "operation": "r2v",
+      "characters": ["fang"],
+      "location": "watch-shop",
+      "camera": {
+        "shot_size": "macro_close_up",
+        "movement": "static",
+        "screen_direction": {"fang": "center"}
+      },
+      "conditioning": {
+        "reference_images": ["refs/characters/fang.png", "refs/locations/watch-shop.png"]
+      },
+      "continuity": {
+        "from": null,
+        "relation": "new_scene",
+        "handoff": "stable_frame",
+        "must_match": ["wardrobe", "location", "prop_state", "lighting"],
+        "state_in": {"fang.position": "workbench", "watch": "open", "shop-door": "closed"},
+        "state_out": {"fang.position": "workbench", "watch": "running", "shop-door": "closed"}
+      },
+      "generation_plan": {
+        "risk": "high",
+        "audition_takes": 3,
+        "audition_profile": "audition",
+        "final_profile": "final",
+        "promotion": "manual"
+      },
+      "dialogue": [],
+      "prompt": "旧钟表店的木质工作台，微距固定镜头。方砚用精细工具装回最后一枚齿轮，合上无品牌旧表后秒针平稳移动，保持手部、围裙和晨光一致，画面内无文字。"
+    },
+    {
+      "schema_version": "1.0",
+      "id": "S02",
+      "title": "重新开门",
+      "duration": 6,
+      "width": 768,
+      "height": 432,
+      "fps": 24,
+      "operation": "t2v",
+      "characters": ["fang"],
+      "location": "watch-shop",
+      "camera": {
+        "shot_size": "medium_wide",
+        "movement": "slow_pan",
+        "screen_direction": {"fang": "right"}
+      },
+      "conditioning": null,
+      "continuity": {
+        "from": "S01",
+        "relation": "continuous",
+        "handoff": "none",
+        "must_match": ["wardrobe", "location", "prop_state", "lighting"],
+        "state_in": {"fang.position": "workbench", "watch": "running", "shop-door": "closed"},
+        "state_out": {"fang.position": "door", "watch": "workbench", "shop-door": "open"}
+      },
+      "generation_plan": {
+        "risk": "medium",
+        "audition_takes": 2,
+        "audition_profile": "audition",
+        "final_profile": "final",
+        "promotion": "manual"
+      },
+      "dialogue": [],
+      "prompt": "延续同一钟表店与晨光，中广景缓慢向右摇摄。方砚把修好的旧表留在工作台，收起门边的停业牌并打开店门，墙上挂钟保持不动，动作平静，画面内无文字。"
+    }
+  ]
+}

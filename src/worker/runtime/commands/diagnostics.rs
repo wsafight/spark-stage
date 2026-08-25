@@ -47,6 +47,7 @@ impl WorkerRuntime {
             ok: true,
             revision: Some(state.revision),
             snapshot: None,
+            payload: None,
             artifact_path: Some(logs),
             message: Some("project logs ready".to_owned()),
             error: None,

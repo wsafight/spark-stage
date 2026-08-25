@@ -2,6 +2,9 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::domain::BudgetContract;
+use crate::store::{BatchTakeSelection, CleanupPlan, DecisionRecord, StorageReport};
+
 pub const IPC_PROTOCOL_VERSION: &str = "1.0";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -20,6 +23,7 @@ pub struct ClientRequest {
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum WorkerCommand {
     Health,
+    ListProjects,
     Snapshot,
     Subscribe {
         project_revision: u64,
@@ -29,6 +33,26 @@ pub enum WorkerCommand {
         project_id: String,
         title: String,
         brief: String,
+    },
+    PauseProject,
+    ResumeProject,
+    UpdateBudget {
+        contract: BudgetContract,
+    },
+    StorageStatus,
+    CreateCleanupPlan,
+    ApplyCleanupPlan {
+        plan_id: String,
+    },
+    RestoreCleanupPlan {
+        plan_id: String,
+    },
+    ReviewBatch {
+        selections: Vec<BatchTakeSelection>,
+        approve: bool,
+    },
+    DecisionHistory {
+        limit: u32,
     },
     ApplyScript {
         bundle_json: String,
@@ -86,12 +110,15 @@ impl WorkerCommand {
         !matches!(
             self,
             Self::Health
+                | Self::ListProjects
                 | Self::Snapshot
                 | Self::Subscribe { .. }
                 | Self::PreviewTake { .. }
                 | Self::OpenBuild { .. }
                 | Self::RetryProbe { .. }
                 | Self::OpenLogs
+                | Self::StorageStatus
+                | Self::DecisionHistory { .. }
         )
     }
 }
@@ -107,11 +134,42 @@ pub struct WorkerReply {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot: Option<AppSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<WorkerPayload>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_path: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<WorkerError>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+pub enum WorkerPayload {
+    ProjectList { projects: Vec<ProjectListItem> },
+    StorageReport(StorageReport),
+    CleanupPlan(CleanupPlan),
+    DecisionHistory { decisions: Vec<DecisionRecord> },
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectListItem {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    #[serde(default)]
+    pub paused: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -170,6 +228,8 @@ pub struct ProjectSummary {
     pub outcome: String,
     pub work_mode: String,
     pub quality_target: String,
+    #[serde(default)]
+    pub paused: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -189,12 +249,30 @@ pub struct GpuSummary {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BudgetSummary {
+    #[serde(default)]
+    pub estimate_source: String,
     pub elapsed_seconds: u64,
+    #[serde(default)]
+    pub estimated_total_seconds: u64,
     pub estimated_remaining_seconds: u64,
+    #[serde(default)]
+    pub wall_clock_limit_seconds: u64,
     pub disk_free_bytes: u64,
     pub disk_required_bytes: u64,
+    #[serde(default)]
+    pub minimum_disk_free_bytes: u64,
     pub audition_takes_used: u32,
     pub audition_takes_limit: u32,
+    #[serde(default)]
+    pub max_audition_takes_per_shot: u32,
+    #[serde(default)]
+    pub final_takes_used: u32,
+    #[serde(default)]
+    pub final_takes_limit: u32,
+    #[serde(default)]
+    pub max_final_takes_per_shot: u32,
+    #[serde(default)]
+    pub overrun_required: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -329,5 +407,15 @@ mod tests {
                 shot_ids: Vec::new(),
             }
         );
+    }
+
+    #[test]
+    fn legacy_project_summary_defaults_to_active() {
+        let summary: super::ProjectSummary = serde_json::from_str(
+            r#"{"id":"demo","title":"Demo","stage":"shooting","outcome":"in_progress","work_mode":"director","quality_target":"playable"}"#,
+        )
+        .unwrap();
+
+        assert!(!summary.paused);
     }
 }

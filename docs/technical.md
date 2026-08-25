@@ -1,8 +1,8 @@
 # SparkStage 技术设计
 
-**版本**：0.3<br>
-**日期**：2026-08-25<br>
-**状态**：MVP 实现基线<br>
+**版本**：0.4<br>
+**日期**：2026-08-26<br>
+**状态**：MVP 无 GPU 实现基线；DGX/H3 集成待验证<br>
 **目标平台**：NVIDIA DGX Spark（Linux aarch64）<br>
 **Rust 基线**：rustc 1.98.0，edition 2024<br>
 **产品合同**：[product.md](product.md)<br>
@@ -136,9 +136,10 @@ spark-montage/
 | ID | ULID | request、command、event 和 review run；可排序但不承载业务语义 |
 | Hash | sha2 | workflow、模型、输入和合同指纹 |
 | 文件锁 | fs4 | worker 和项目 advisory lock；不采用已停止维护的 fs2 |
+| 项目归档 | tar | 标准 TAR 容器；SparkStage manifest 单独记录版本、文件大小和 SHA-256，不依赖外部 `tar` 命令 |
 | 日志 | tracing、tracing-subscriber | 结构化运行日志 |
 | 错误 | thiserror | 内部错误类型到稳定错误码的映射 |
-| 测试 | tempfile、Ratatui TestBackend | 临时项目、故障注入和 TUI 快照 |
+| 测试 | tempfile、Ratatui TestBackend、cargo-llvm-cov | 临时项目、故障注入、TUI 快照和覆盖率门禁；CI 另跑 cargo-audit / cargo-deny |
 | 媒体 | ffmpeg、ffprobe | 独立进程调用，不通过 shell 拼字符串 |
 
 工程锁定 rustc 1.98.0 与 edition 2024，并提交 `rust-toolchain.toml` 和 `Cargo.lock`。crate 使用兼容该编译器、能在 DGX Spark aarch64 编译的版本；本机 macOS 通过不等于 DGX 兼容，DGX 烟测结果必须单独记录。
@@ -298,6 +299,12 @@ Bundle 不能包含 ComfyUI node id、scheduler、步数或 workflow JSON。具�
 
 TUI 或 CLI 提交审批时携带 approval id 和它读取到的 `expected_revision`；若状态已变化，worker 返回 `REVISION_CONFLICT`，客户端刷新后让用户重新确认，防止在旧画面上批准错误 take。
 
+### 8.3.1 BudgetContract
+
+预算合同持久化在 `ProjectState.budget`，包含独立 `contract_revision`、总墙钟、每镜 audition/final take 上限、最低剩余磁盘、云费用开关、超限策略和估算 profile。当前默认 profile 的 source 必须显示为 `unmeasured_default_v1`：4 小时、每镜 3 个 audition / 2 个 final、5 GiB 磁盘硬线，audition/final 暂按每视频秒 30/120 墙钟秒和 4/12 MiB。它们是保守占位值，不是 DGX 或 H3 benchmark。
+
+排队前按当前合同、已产出 take 和计划镜头重新计算增量。时间或 take 维度超限会创建稳定 ID 的 blocking `budget_overrun` approval；批准只授予对应合同 revision、镜头和维度，修改预算合同会递增 revision 并清除旧授权。磁盘低于 hard floor 直接返回 `DISK_BUDGET_EXCEEDED`，任何 approval 都不能绕过。`budget status/default/apply` 与 TUI 读取同一份快照。
+
 ### 8.4 JobJournal
 
 ```text
@@ -353,19 +360,26 @@ JSON 快照采用同目录临时文件协议：
 
 读取方永远只看到旧快照或新快照。未知 schema、损坏 JSON 或 revision 倒退都禁止继续写。
 
-### 9.3 跨文件命令
+### 9.3 跨文件命令与决策日志
 
 没有数据库时不能假装多个文件天然事务化。每个变更命令按以下次序执行：
 
-1. 以 `command_id` 在 command journal 写入 `prepared`。
-2. 写入项目 job journal，保证外部副作用之前已有恢复依据。
-3. 更新项目状态与全局队列的原子快照。
-4. 追加 decision / event，记录相同 `command_id` 和稳定 event id。
-5. 把 command journal 标为 `committed` 并返回结果。
+1. 以 `command_id` 在 worker command journal 写入 `prepared`；需要外部副作用时先写 job/attempt 恢复依据。
+2. 对将随状态一起生效的 decision batch，先逐条追加 `phase=prepared`，每条带稳定 event id、command id 和目标 revision；history 不展示 prepared 记录。
+3. 原子写项目状态，并把 `last_command_id` 设为当前 command；需要时再原子写 queue 或 cleanup plan 的 operation 状态。
+4. 为同一批 event 追加 `phase=committed`，最后把 worker command journal 标为 `committed` 并返回结果。
 
-worker 重启后扫描未提交 command，根据 job id、attempt request id、目标 revision 和 job journal 幂等补齐。JSONL 读取端按 event id 去重；`decisions.jsonl` 不独自反推当前状态。
+worker 重启或下一次项目写入前扫描未完成记录：若 `state.last_command_id` 与 prepared command 匹配，则幂等补齐 committed；否则隐藏并放弃该 prepared decision，不能从 JSONL 反推状态。读取端按 event id 去重，旧版没有 phase 的 decision 兼容为 committed。cleanup plan 在移动文件前写 `applying/restoring` 与 active operation，恢复时同时核对源路径和 trash 路径，因此在 rename 中途退出也能继续而不重复移动。
 
 worker 内部采用单 actor 提交状态：HTTP、WebSocket、ffmpeg 和审片任务可以异步执行，但它们只能把结果消息发回 actor，由 actor 串行更新 job、project state 和 queue。模块持有文件路径不等于拥有写权限。
+
+### 9.4 离线校验、归档与 schema 迁移
+
+`project verify/export/verify-archive/import/migrate` 是显式维护命令，不进入运行态 command actor。`verify` 和 `export` 持有 project lock；`import` 持有 projects 目录级锁并使用隐藏暂存容器；`migrate --apply` 持有 project lock。worker 的正常变更也使用同一 project lock，因此维护命令与运行态写入不会并发落盘。
+
+归档格式是标准 TAR，第一项固定为 `archive-manifest.json`，其余项只能是 `project/<safe-relative-path>` 普通文件。manifest 按路径排序，记录 archive schema、project schema、项目 ID、字节数和逐文件 SHA-256；`project.lock` 不归档，symlink、特殊文件、重复/额外路径、非 UTF-8 路径和目标位于源项目内部都拒绝。验证还要解析 project/state、核对 brief hash 和每个 contract bundle hash，不能只验证 TAR header。导入完整执行两遍验证并在暂存项目按真实 ID 打开成功后才 rename 发布；已存在目标永不覆盖。
+
+迁移默认 dry-run，报告源/目标 schema、具体变更和将使用的 backup 路径。当前只支持项目与 state 分别处于 `0.9` 或 `1.0` 的恢复性升级到 `1.0`；`--apply` 在任何项目文件修改前复制原始 `project.json`、`state.json` 和 plan 到 `backups/migrations/<migration-id>/`，再分别原子替换。未知 schema 只返回不可应用计划；不推断或迁移人工审批语义。
 
 ## 10. IPC 与命令协议
 
@@ -519,6 +533,8 @@ preflight 校验 workflow 文件 hash、节点存在、input 名、输出节点�
 
 `sparkstage benchmark h3` 是 worker 的受控命令，不是第二套 ComfyUI 客户端。它先等待当前 GPU job 到达安全边界，再取得 benchmark reservation；未获锁时不能清理、终止或覆盖其它项目任务。benchmark 调用生产 adapter 的 prepare / submit / reconcile / fetch 路径，只在外围增加 profiler、遥测和实验报告。
 
+当前无需 DGX 的 P0 只实现 `benchmark h3 init/record/show`：`init` 冻结 adapter、workflow、profile 与环境指纹，`record` 追加已有生产 job 的原始样本和 evidence，`show` 读取不可变记录。这三个命令不访问 GPU，也不能把 run 标为 `verified`。后续发起真实 H3 实验的执行命令仍按上一段进入 worker 与 `gpu_benchmark` reservation；`record` 不是第二套投递客户端。
+
 ## 14. Pipeline 与 Profile
 
 Pipeline 描述制片语义，adapter profile 描述模型参数，两者分开：
@@ -600,11 +616,15 @@ TUI 是同一命令面的高密度控制台，适合本机终端和 SSH。它不
 
 | 页面 | 内容 | 主要动作 |
 | --- | --- | --- |
+| Projects | 项目列表、阶段、结果、revision 和暂停状态 | 切换项目、pause、resume |
 | Dashboard | 项目阶段、结果、GPU 当前任务、预算、待审批和最近失败 | 进入待处理项 |
+| Review | 当前 blocking approvals 与多镜候选 | 批量选择、批准、显式接受 warning |
 | Shots | 镜头阶段、风险、候选数、批准 take、stale | audition、direct render、retry |
 | Takes | 当前镜头候选、profile、硬检查、分数与警告 | select、approve、reject、preview |
 | Queue | running / pending、优先级、ETA 和资源类别 | pause、resume、cancel |
 | Builds | draft、trailer、final 与 recipe 状态 | build、open、rebuild |
+| Storage | 总占用、回收区和可回收候选 | status、plan、apply、restore |
+| History | committed decision、command 和时间 | 查看最近决策，不从日志猜审批 |
 | Diagnostics | preflight、adapter capability、失败码和日志摘要 | retry probe、打开日志 |
 
 宽终端使用列表 + 详情双栏；窄终端退化为单栏，不截断 ID 和失败码。颜色只作辅助，状态同时使用文字或符号表达。
@@ -626,7 +646,7 @@ TUI 是同一命令面的高密度控制台，适合本机终端和 SSH。它不
 
 MVP 不依赖 Kitty / Sixel 等终端图片协议。`preview` 向 worker 请求已验证媒体路径，再由 TUI 进程以参数数组调用用户配置的播放器；后台 worker 不负责猜测 DISPLAY 或 SSH 显示环境。需要占用当前终端的播放器启动前，TUI 暂时恢复 normal screen 和 cooked mode，播放器退出后再安全进入 TUI。没有播放器时显示路径和联系表。播放器失败只影响预览，不改变 take 或 job 状态。
 
-Ratatui 与 Crossterm 的精确版本由第一次 aarch64 编译验证后锁定，不能只根据官网示例假定组合兼容。
+当前锁定 Ratatui 0.30.2 与 Crossterm 0.29；macOS 无 GPU 测试已通过，DGX Spark aarch64 的终端、SSH 和播放器行为仍需实机烟测，不能只根据官网示例推断兼容。
 
 ## 19. 错误与重试
 
@@ -684,9 +704,13 @@ Ratatui 与 Crossterm 的精确版本由第一次 aarch64 编译验证后锁定�
 - 不同外部 Agent 产生的 fixture 通过同一 contract suite
 - ComfyUI mock 的成功、失败、断线、history 延迟和非法输出路径
 - mock adapter 在不改 `shots.json` 的前提下通过同一 contract suite；第二个真实 adapter 留到 v2 验证
-- ffprobe fixture 的无音轨、错时长、黑帧和损坏文件
+- 合成媒体 fixture 的必选/可选音轨、静音、错时长、FPS、黑帧、静帧、首尾/接力帧，以及两段真实 FFmpeg build、交付副本、联系表和血缘报告；运行时预检失败时才允许跳过，开始生成夹具后不吞错误
+- 项目 verify、带逐文件 SHA-256 的 TAR export、篡改拒绝、verify-before-import、禁止覆盖、schema migration dry-run 和修改前备份
+- decision prepared/committed、批量原子 history、cleanup apply/restore 中断恢复
 - Ratatui TestBackend 的宽 / 窄布局与关键状态快照
 - panic 和退出后的终端恢复单元边界
+
+GitHub Actions 在 Linux/macOS 上执行 fmt、严格 Clippy 和 all-target tests；Linux 安装标准 FFmpeg，使合成媒体测试走完整路径。CI 还要求每个 Rust 文件少于 900 行，超过阈值时应按职责拆分模块，而不是压缩格式。另有 Linux aarch64 cross-check、`cargo llvm-cov --fail-under-lines 65`、`cargo audit --deny warnings` 和 `cargo deny check`。本地随应用附带的裁剪版 FFmpeg 若缺 lavfi 源会在 fixture preflight 阶段跳过，因此本地“测试通过”不能代替 CI 的标准 FFmpeg 结果。
 
 ### 22.2 DGX Spark 集成测试
 
@@ -704,20 +728,20 @@ Ratatui 与 Crossterm 的精确版本由第一次 aarch64 编译验证后锁定�
 
 ## 23. 实施顺序
 
-### Phase 0：冻结事实
+### Phase 0：冻结事实（合同完成，H3 事实待 DGX）
 
 - 冻结 CreativeBrief / ScriptBundle 边界和 `screenwriter` skill 的最小输出
 - 导出 H3 API workflow
 - 核实节点 binding、输入输出和 T2V capability
 - 记录现有手工运行的观察值，但不把它冒充生产 benchmark
 
-### Phase 1：领域与存储
+### Phase 1：领域与存储（已完成）
 
 - Cargo 工程、schema、ID、hash、原子存储和项目锁
 - brief / script bundle / authoring receipt / bible index / shot / state / approval / job / attempt / take 类型
 - 只读 `sparkstage preflight`、`sparkstage script validate` 和 store / schema 测试；本阶段不暴露会写状态的 `project new`
 
-### Phase 2：最小 worker 与 ComfyUI
+### Phase 2：最小 worker 与 ComfyUI（控制面和 mock 已完成，真实 binding 待 DGX）
 
 - Unix socket、命令幂等、revision
 - 通过 worker 交付 `sparkstage project new` 和 `sparkstage project status --json`
@@ -725,25 +749,25 @@ Ratatui 与 Crossterm 的精确版本由第一次 aarch64 编译验证后锁定�
 - `script validate`、`script apply`、文案包批准与原子提升
 - adapter 的 submit / WebSocket / history / backend failure / output / recovery
 
-### Phase 2.5：生产链 benchmark
+### Phase 2.5：生产链 benchmark（记录控制面已完成，真实实验待 DGX）
 
 - `sparkstage benchmark h3` 复用 worker、GPU 锁和 camera adapter
 - 建立可信 baseline，再验证 audition / final、attention、compile、cache 和量化 profile
 - 原始产物写入应用数据目录，仓库只保留小型汇总结论
 
-### Phase 3：出镜闭环
+### Phase 3：出镜闭环（状态、媒体和 build 逻辑完成，真实 H3 输出待验收）
 
 - audition、select、promote、direct render、retry、approve
 - ffprobe 硬检查、take 血缘、首尾帧和报告
 - draft cut、trailer 和 final build
 
-### Phase 4：Ratatui
+### Phase 4：Ratatui（已完成）
 
 - TerminalGuard、IPC snapshot 和事件订阅
-- Dashboard、Shots、Takes、Queue、Builds、Diagnostics
+- Projects、Dashboard、Review、Shots、Takes、Queue、Builds、Storage、History、Diagnostics
 - 外部预览、revision conflict 和窄终端退化
 
-### Phase 5：验证
+### Phase 5：验证（无 GPU 回归已完成，产品与 DGX 验证待执行）
 
 - 《雨夜公寓》三镜试拍与十镜闭环
 - 故障注入
@@ -752,9 +776,9 @@ Ratatui 与 Crossterm 的精确版本由第一次 aarch64 编译验证后锁定�
 
 ### 23.1 当前实现边界
 
-截至 2026-08-25，本地代码与无 GPU 测试已覆盖项目存储、worker IPC、文案合同批准、队列暂停/恢复/取消、候选与 take 决策、自动 audition 批次、build 执行与恢复、stale 传播、人工终片 gate、联系表命令构造和 CLI/TUI 控制面。ComfyUI mock 已验证 `/prompt` 的 request identity、`/history` 成功与执行失败、WebSocket 断线后的 history 收口、非法输出路径拒绝和全局 interrupt 协议。这里的“已覆盖”表示控制逻辑、状态转换和错误路径可测试，不表示 MiniMax H3 workflow 或 DGX Spark 性能已经验证。
+截至 2026-08-26，本地代码与无 GPU 测试已覆盖项目存储、worker IPC、文案合同批准、队列暂停/恢复/取消、候选与 take 决策、自动 audition 批次、build 执行与恢复、stale 传播、人工终片 gate、预算估算/审批/磁盘硬线、两阶段 decision 恢复、可恢复清理、Ratatui 10 页控制面、项目 TAR 归档/无覆盖导入和 `0.9 -> 1.0` 迁移备份。两个独立完整 ScriptBundle fixture 与一个拒绝样例通过固定 contract suite；ComfyUI mock 已验证 `/prompt` request identity、`/history` 成功与执行失败、WebSocket 断线后的 history 收口、非法输出路径拒绝和全局 interrupt 协议。这里的“已覆盖”表示控制逻辑、状态转换和错误路径可测试，不表示 MiniMax H3 workflow、DGX Spark 性能或外部模型文案质量已经验证。
 
-仍需在 DGX Spark 完成：导出并绑定真实 H3 API workflow，确认 prompt、seed、输出、模型指纹和原生音轨，实测 T2V 与任何 I2V / FLF2V / R2V 能力，验证完整 FFmpeg build 与联系表产物，以及记录 audition/final 的冷启动、稳态耗时、显存和质量基线。在这些结果落盘前，相关 capability 必须保持未验证或禁用。
+仍需在 DGX Spark 完成：导出并绑定真实 H3 API workflow，确认 prompt、seed、输出、模型指纹和原生音轨，实测 T2V 与任何 I2V / FLF2V / R2V 能力，用真实 H3 素材验证完整 FFmpeg build 与联系表产物，以及记录 audition/final 的冷启动、稳态耗时、显存和质量基线。在这些结果落盘前，相关 capability 必须保持未验证或禁用，预算 source 保持 `unmeasured_default_v1`。
 
 ## 24. 开工前仍需实测的事实
 

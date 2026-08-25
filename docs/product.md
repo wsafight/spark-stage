@@ -1,8 +1,8 @@
 # SparkStage 产品文档
 
-**版本**：0.8<br>
-**日期**：2026-08-25<br>
-**状态**：MVP 开发中，先以合同与校验器冻结边界<br>
+**版本**：0.9<br>
+**日期**：2026-08-26<br>
+**状态**：MVP 控制面 P0 已完成，无 GPU 回归持续通过；DGX Spark / H3 实机闭环待验证<br>
 **运行基座**：NVIDIA DGX Spark（GB10）<br>
 **控制面工具链**：Rust 1.98.0，edition 2024<br>
 **当前生成栈**：MiniMax H3，由本机 ComfyUI 调度<br>
@@ -33,7 +33,7 @@ SparkStage 是运行在 NVIDIA DGX Spark 上的**智能体制片操作系统**�
 
 三件事同时成立，以前不成立：
 
-1. **本机已经能出真视频**。当前机房用 MiniMax H3 验证过：一次出画面 + 立体声对白，5 秒 / 960x544 / 12 步大约 4 分钟一镜。以后换别的模型，只要还走同一套分镜合同即可。
+1. **本机视频生成已有历史可行性观察**。此前 MiniMax H3 曾产出画面和立体声对白，5 秒 / 960x544 / 12 步约 4 分钟一镜；该数字尚未按当前 adapter、workflow、驱动和 benchmark 合同复测，不能作为已验证基线。以后换别的模型，只要还走同一套分镜合同即可。
 2. **编程助手已经能当制片人**。OpenMontage 证明了「YAML 管线 + Markdown 技能 + 薄工具层」比再写一个 GUI 剪辑器更适合 Agent。
 3. **缺的是操作系统，不是模型**。桌上已经有散落的出镜脚本和短剧前作，但剧本、角色锁、审片标准、失败重拍、配乐字幕、多项目并行，全是散件。再堆脚本会烂。
 
@@ -319,6 +319,8 @@ TUI 首屏固定展示项目阶段、GPU 当前任务、队列、预算、待审
 
 用户不需要手填所有数字；`short-drama` 提供保守默认值，立项时用一句话显示。新增候选、提高 final profile 或全量重拍前重新估算，只展示增量成本。快速模式也不能越过硬预算，未用完的预算不构成继续抽卡的理由。
 
+当前默认合同明确标记为 `unmeasured_default_v1`，不是 H3 实测值：总墙钟 4 小时，每镜最多 3 个 audition take、2 个 final take，最低剩余磁盘 5 GiB；audition / final 暂按每视频秒 30 / 120 墙钟秒和 4 / 12 MiB 估算。时间或 take 超限进入 blocking approval，用户批准具体超限维度后才能重试；最低磁盘线是不可绕过的硬停止。`budget status/default/apply` 和 TUI 都显示估算来源，DGX benchmark 完成后再替换参数。
+
 ---
 
 ## 6. 能力地图
@@ -373,7 +375,7 @@ TUI 首屏固定展示项目阶段、GPU 当前任务、队列、预算、待审
 - 更准确的资源预算：按分辨率 × 秒 × 步数估时和占盘
 - 把本机审片页开放到受控局域网，不做云盘
 - 输出平台派生版本：在主规格通过后再安全裁切或重构横版 / 竖版
-- 项目归档包和 schema 跨版本迁移工具
+- 多版本、增量或压缩归档与跨多个历史 schema 的迁移；基础校验和 TAR 归档、无覆盖导入、`0.9 -> 1.0` dry-run / 备份迁移已提前交付
 
 ### 6.4 永远不是核心
 
@@ -733,7 +735,7 @@ MVP 默认交付路径是无人值守生成 `draft_cut` 候选，再用一次全
 S06 已自动重拍 2 次，仍有 FACE_DRIFT。
 最好版本已保留为 S06-T002，没有影响其它已过审镜头。
 可选：更换参考图后重拍 / 接受当前版本 / 停在这里。
-预计再次重拍约 4 分钟。
+预计再次重拍：当前未校准粗估约 4 分钟，以本机历史样本来源为准。
 ```
 
 运行时离线时先尝试恢复一次；磁盘不足时不得启动新镜头；用户取消时保留已完成素材并把项目落到可续跑状态。任何部分失败都不能删除已过审的 take。
@@ -806,6 +808,8 @@ S06 已自动重拍 2 次，仍有 FACE_DRIFT。
 10. Ratatui 控制台复用同一 worker 命令面，完成队列、候选、审批、失败和预算操作
 11. 《雨夜公寓》作为第一个 project 挂上，先三镜试拍再完整十镜
 
+截至 2026-08-26，以上控制面、合同、worker/IPC、持久队列、take/build 状态、媒体检查、预算、Ratatui、清理恢复、决策历史和 mock ComfyUI 错误路径已有无 GPU 实现与测试；基础项目归档/导入和 schema 迁移也已提前完成。第 3、4、6、7、8、11 项中依赖真实 H3 workflow、音轨、画质、耗时和 DGX 环境的部分仍未验收，不能因 mock 或合成媒体测试通过而视为完成。
+
 **MVP 完成定义**：外部 Agent 用 `screenwriter` skill 从一句 brief 生成通过校验且经批准的文案包，再用低成本候选拼出《雨夜公寓》动态草稿；选中候选后晋级并无人值守生成预告和终片候选。此时项目保持 `needs_review`，必须经过一次全片人工画面确认才能成为 `playable` / `done`。磁盘上出现文案来源记录、两个视频候选、一张缩略图总览、一组边界对照和一份可追溯审片报告。中途重启一次仍能续跑，CLI 和 TUI 看到同一状态，过程不用手改代码、workflow JSON 或状态文件。
 
 ### v1
@@ -816,7 +820,7 @@ bible + 定妆 + 本机能力验证后的 I2V / FLF2V + 身份参考 + 自动边
 
 ### v2
 
-第二条管线（口播或产品演示）证明内核真的和垂类解耦；第二个 adapter 证明内核真的和模型解耦。增加平台派生版本、项目归档和 schema 迁移。是否增加 Tauri 桌面壳，由真实用户安装和审片反馈决定，不作为 v2 的预设目标。
+第二条管线（口播或产品演示）证明内核真的和垂类解耦；第二个 adapter 证明内核真的和模型解耦。增加平台派生版本、增量/压缩归档和更多历史 schema 的迁移。是否增加 Tauri 桌面壳，由真实用户安装和审片反馈决定，不作为 v2 的预设目标。
 
 ---
 
@@ -928,30 +932,25 @@ MVP 不是跑通一次《雨夜公寓》就算成功。第一轮必须完成 3 �
 | 出镜 / 拼接 / 值守散件 | 桌面旧目录 | 收成 `tools/` |
 | 《17号储物柜》前作 | `minimax-h3-short-drama` | 第二条短剧项目，不混进内核 |
 | OpenMontage 本地副本 | `../reference/OpenMontage/` | 只学习 manifest、skill、checkpoint、adapter contract 和 Backlot；不参与构建 |
-| DGX Spark 当前基线 | 5 秒 / 960x544 / 12 步约 4 分钟 | 建立 audition / final profile 前的对照组 |
+| DGX Spark 历史观察值 | 5 秒 / 960x544 / 12 步约 4 分钟，当前未复测 | 只能作为 benchmark 候选对照，不能标 verified |
 | H3 优化验证计划 | `optimization.md` | 管理性能基线、单变量实验、自动审片和 profile 准入 |
 | SparkStage 技术设计 | `technical.md` | 约束 Rust worker、Ratatui、状态存储、ComfyUI adapter 和故障恢复 |
 
 ---
 
-## 15. 下一步（按这个顺序动）
+## 15. 下一步（从 DGX 对接开始）
 
-1. 用至少两个外部大模型会话各生成一份完整十镜 ScriptBundle，依据真实校验失败收紧当前 `screenwriter` skill 与 schema。
-2. 实现最小 worker / IPC、`project new --brief-file`、`script apply / approve`、项目锁和原子写入；未批准 bundle 不能创建 H3 job。
-3. 从 DGX Spark 导出当前 MiniMax H3 ComfyUI API workflow，列出 prompt、seed、首帧、尾帧、参考素材、音频和输出节点的真实绑定。
-4. 对当前 workflow 做最小能力烟测，只把验证成功的 T2V / I2V / FLF2V / R2V 标成 `supported`。
-5. 按 `technical.md` 冻 state、approval、take、job / attempt 和 adapter capability schema，写 `pipelines/short-drama.yaml` 空壳。
-6. 交付 `sparkstage preflight`、`project status --json`、全局队列与可恢复的 worker 生命周期。
-7. 用 adapter 包住现有 ComfyUI / MiniMax H3 工作流，不重写生成逻辑；实现 job / attempt 状态、后端失败、job id 恢复和重复提交保护。
-8. 通过生产 worker / adapter 执行 `optimization.md` 的单变量 benchmark，复测 final 基线和至少两组 audition profile；确认 2–3 个小样总机时低于一次 final，否则不默认多抽。
-9. 完成持久队列、`sparkstage shots audition`、候选选择、promote、direct render、缺镜续跑和单镜重拍。
-10. 为每个 take 写血缘和首尾帧，完成 stale 传播、边界审片、追加式决策历史和安全磁盘预检。
-11. 用 Ratatui + Crossterm 建 `sparkstage tui`，只通过 worker 完成队列、候选、审批、重拍和预算操作。
-12. 成片工具支持指定镜号、动态草稿、预告和正片，并输出缩略图总览、边界对照、来源与审片报告。
-13. 把《雨夜公寓》挂成第一个 project：外部 Agent 出文案包 → 三镜试拍 → 小样抽卡 → 动态草稿 → 晋级十镜成片。
-14. 补齐立项、出镜、审片、重拍和成片技能，再跑故障演练与 3 部 / 30 镜验证。
+无需 DGX 的控制面基线已经完成：Rust/worker/IPC、Ratatui 10 页控制台、预算和审批、崩溃恢复、可恢复清理、项目归档迁移、CI/覆盖率/依赖审计，以及两套独立 ScriptBundle 回归夹具。接下来按以下顺序只补真实生产证据：
 
-没做完 1–13 之前，不画桌面界面，不把第二个垂类做进内核。MVP 跑稳后只先做本机审片页，Tauri 桌面壳等内测数据再决定。
+1. 在 DGX Spark 导出当前 MiniMax H3 ComfyUI API workflow，逐项填写 prompt、seed、输出、首帧、尾帧、参考素材和音频 binding；生成的 adapter 先保持 disabled。
+2. 执行最小 T2V 烟测并保存 capability report；I2V / FLF2V / R2V 分别独立验证，未通过的能力保持禁用，不做静默降级。
+3. 用生产 worker/adapter 跑冷启动和稳态 baseline，再单变量比较 audition/final、attention、compile、cache 和 FP8；用结果替换 `unmeasured_default_v1` 预算参数。
+4. 用真实输出执行首尾/接力帧、音轨、黑帧/静帧/静音、两镜 build、联系表和血缘报告验收；标准 FFmpeg 的合成媒体 CI 是前置回归，不替代 H3 素材验收。
+5. 让至少两个真实外部 Agent 会话各生成完整十镜 ScriptBundle，记录首次通过率和修复次数；checked-in fixture 只保证合同回归，不冒充模型质量评测。
+6. 把《雨夜公寓》挂成第一个真实 project：三镜试拍 → 小样抽卡 → 动态草稿 → 晋级十镜终片候选，完整演练中断恢复、预算超限、单镜重拍和最终人工画面 gate。
+7. 完成 3 部 / 30 镜产品验证后再进入 v1 身份锁、自动审片和本机审片页；Tauri 桌面壳继续由真实内测反馈决定。
+
+第 1–6 项完成前，不对外承诺 H3 能力、角色一致性、约 4 分钟基线或“一句话成片”，也不把第二垂类做进内核。
 
 ---
 

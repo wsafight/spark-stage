@@ -5,10 +5,11 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
 use super::*;
+use crate::store::{CleanupItem, CleanupPlan, CleanupPlanStatus, DecisionRecord, StorageReport};
 use crate::tui::backend::{BackendError, BackendReply};
 use crate::tui::protocol::{
-    AppSnapshot, BudgetSummary, FailureSummary, GpuSummary, ProjectSummary, QueueSummary,
-    WorkerCommand,
+    AppSnapshot, BudgetSummary, DiagnosticSummary, FailureSummary, GpuSummary, ProjectListItem,
+    ProjectSummary, QueueJobSummary, QueueSummary, WorkerCommand,
 };
 
 #[derive(Clone)]
@@ -28,6 +29,7 @@ impl TuiBackend for RenderBackend {
     ) -> Result<BackendReply, BackendError> {
         Ok(BackendReply {
             snapshot: Some(self.snapshot.clone()),
+            payload: None,
             artifact_path: None,
             message: Some("accepted".to_owned()),
         })
@@ -46,6 +48,7 @@ fn snapshot() -> AppSnapshot {
             outcome: "needs_review".to_owned(),
             work_mode: "director".to_owned(),
             quality_target: "playable".to_owned(),
+            paused: false,
         },
         gpu: GpuSummary {
             status: "busy".to_owned(),
@@ -61,6 +64,7 @@ fn snapshot() -> AppSnapshot {
             disk_required_bytes: 32 * 1024 * 1024 * 1024,
             audition_takes_used: 2,
             audition_takes_limit: 6,
+            ..BudgetSummary::default()
         },
         pending_approvals: vec![ApprovalSummary {
             approval_id: "APPROVAL-LONG-ID-0001".to_owned(),
@@ -102,10 +106,33 @@ fn snapshot() -> AppSnapshot {
         queue: QueueSummary {
             revision: 3,
             paused: false,
-            jobs: vec![],
+            jobs: vec![QueueJobSummary {
+                job_id: "JOB-QUEUE-0001".to_owned(),
+                subject: "S02 audition".to_owned(),
+                state: "running".to_owned(),
+                priority: "normal".to_owned(),
+                resource: "gpu_exclusive".to_owned(),
+                progress: Some(0.5),
+                eta_seconds: Some(65),
+            }],
         },
-        builds: vec![],
-        diagnostics: vec![],
+        builds: vec![BuildSummary {
+            build_id: "BLD-DRAFT-0001".to_owned(),
+            kind: "draft".to_owned(),
+            status: "ready".to_owned(),
+            recipe: "builds/BLD-DRAFT-0001/recipe.json".to_owned(),
+            command_id: "CMD-BUILD-0001".to_owned(),
+            output_path: Some("builds/BLD-DRAFT-0001/draft.mp4".into()),
+            warnings: vec!["LOUDNESS_REVIEW".to_owned()],
+            stale: false,
+        }],
+        diagnostics: vec![DiagnosticSummary {
+            probe_id: "PROBE-FFMPEG".to_owned(),
+            component: "ffmpeg".to_owned(),
+            status: "ready".to_owned(),
+            summary: "media tools available".to_owned(),
+            capabilities: vec!["ffprobe".to_owned(), "blackdetect".to_owned()],
+        }],
     }
 }
 
@@ -172,4 +199,90 @@ fn stale_build_status_is_explicit() {
     };
 
     assert_eq!(build_status(&build), "needs_review (stale)");
+}
+
+#[test]
+fn every_operational_page_renders_populated_details() {
+    let mut app = app();
+    app.projects = vec![ProjectListItem {
+        id: "rain-apartment".to_owned(),
+        title: Some("Rain Apartment".to_owned()),
+        stage: Some("shooting".to_owned()),
+        outcome: Some("needs_review".to_owned()),
+        paused: true,
+        revision: Some(42),
+        updated_at: Some("2026-08-25T12:00:00Z".to_owned()),
+        error: None,
+    }];
+    app.storage_report = Some(StorageReport {
+        project_id: "rain-apartment".to_owned(),
+        total_bytes: 4 * 1024 * 1024,
+        trash_bytes: 1024,
+        reclaimable_bytes: 2048,
+        reclaimable_files: 1,
+    });
+    app.cleanup_plan = Some(CleanupPlan {
+        schema_version: "1.0".to_owned(),
+        plan_id: "CLN-REVIEW-0001".to_owned(),
+        project_id: "rain-apartment".to_owned(),
+        source_revision: 42,
+        status: CleanupPlanStatus::Planned,
+        created_at: "2026-08-25T12:00:00Z".to_owned(),
+        applied_at: None,
+        restored_at: None,
+        active_operation: None,
+        items: vec![CleanupItem {
+            kind: "rejected_take".to_owned(),
+            subject_id: "S01-T001".to_owned(),
+            path: "raw/S01/S01-T001.mp4".into(),
+            bytes: 2048,
+        }],
+        reclaimable_bytes: 2048,
+    });
+    app.decisions = vec![DecisionRecord {
+        event_id: "EVT-SELECT-0001".to_owned(),
+        kind: "take_selected".to_owned(),
+        subject_id: "S01-T002".to_owned(),
+        command_id: "CMD-SELECT-0001".to_owned(),
+        occurred_at: "2026-08-25T12:00:00Z".to_owned(),
+    }];
+
+    for (page, markers) in [
+        (Page::Projects, ["Projects (1)", "rain-apartment"]),
+        (Page::Review, ["Batch review", "S01-T002"]),
+        (Page::Takes, ["Takes for S01", "duration_ok"]),
+        (Page::Queue, ["JOB-QUEUE-0001", "gpu_exclusive"]),
+        (Page::Builds, ["BLD-DRAFT-0001", "LOUDNESS_REVIEW"]),
+        (Page::Storage, ["CLN-REVIEW-0001", "2048 B"]),
+        (Page::History, ["EVT-SELECT-0001", "take_selected"]),
+        (Page::Diagnostics, ["PROBE-FFMPEG", "blackdetect"]),
+    ] {
+        app.page = page;
+        let output = draw(&app, 160, 40);
+        for marker in markers {
+            assert!(
+                output.contains(marker),
+                "{} page did not render {marker:?}",
+                page.title()
+            );
+        }
+    }
+}
+
+#[test]
+fn help_and_disconnected_states_remain_actionable() {
+    let backend = RenderBackend {
+        snapshot: snapshot(),
+    };
+    let mut app = App::new(backend, Duration::from_secs(2));
+    app.page = Page::Dashboard;
+
+    let disconnected = draw(&app, 100, 30);
+    assert!(disconnected.contains("Worker unavailable"));
+    assert!(disconnected.contains("Press g to retry"));
+
+    app.show_help = true;
+    let help = draw(&app, 100, 30);
+    assert!(help.contains("Mutations require"));
+    assert!(help.contains("Storage: p plan"));
 }
