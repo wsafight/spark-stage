@@ -197,4 +197,84 @@ mod tests {
             sha256_json(&snapshot).unwrap()
         );
     }
+
+    #[test]
+    fn failed_atomic_replace_removes_temporary_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        fs::create_dir(&path).unwrap();
+
+        let error = write_bytes_atomic(&path, b"replacement").unwrap_err();
+
+        assert!(matches!(error, StoreError::Io { .. }));
+        assert!(path.is_dir());
+        assert_eq!(
+            fs::read_dir(directory.path()).unwrap().count(),
+            1,
+            "failed writes must not leave a temporary file"
+        );
+    }
+
+    #[test]
+    fn optional_json_distinguishes_missing_and_invalid_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("optional.json");
+        assert_eq!(read_json_if_exists::<Snapshot>(&path).unwrap(), None);
+
+        fs::write(&path, b"{invalid").unwrap();
+        let error = read_json_if_exists::<Snapshot>(&path).unwrap_err();
+        assert!(matches!(
+            error,
+            StoreError::Decode { path: ref error_path, .. } if error_path == &path
+        ));
+    }
+
+    #[test]
+    fn jsonl_round_trip_ignores_blank_lines() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("events/events.jsonl");
+        let first = Snapshot {
+            revision: 1,
+            name: "first".to_owned(),
+        };
+        let second = Snapshot {
+            revision: 2,
+            name: "second".to_owned(),
+        };
+
+        append_jsonl(&path, &first).unwrap();
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"\n  \n")
+            .unwrap();
+        append_jsonl(&path, &second).unwrap();
+
+        assert_eq!(read_jsonl::<Snapshot>(&path).unwrap(), [first, second]);
+    }
+
+    #[test]
+    fn invalid_jsonl_reports_the_source_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("events.jsonl");
+        fs::write(&path, "{\"revision\":1,\"name\":\"valid\"}\nnot-json\n").unwrap();
+
+        let error = read_jsonl::<Snapshot>(&path).unwrap_err();
+
+        assert!(matches!(
+            error,
+            StoreError::Decode { path: ref error_path, .. } if error_path == &path
+        ));
+    }
+
+    #[test]
+    fn file_hash_matches_in_memory_hash_for_exact_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("media.bin");
+        let bytes = b"SparkStage\0binary\ncontent";
+        fs::write(&path, bytes).unwrap();
+
+        assert_eq!(sha256_file(&path).unwrap(), sha256_bytes(bytes));
+    }
 }

@@ -83,13 +83,16 @@ async fn read_http_request(stream: &mut TcpStream) -> String {
 
 async fn write_json_response(stream: &mut TcpStream, response: MockResponse) {
     let body = serde_json::to_vec(&response.body).unwrap();
+    write_response(stream, response.status, "application/json", &body).await;
+}
+
+async fn write_response(stream: &mut TcpStream, status: &str, content_type: &str, body: &[u8]) {
     let header = format!(
-        "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        response.status,
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
     stream.write_all(header.as_bytes()).await.unwrap();
-    stream.write_all(&body).await.unwrap();
+    stream.write_all(body).await.unwrap();
 }
 
 #[tokio::test]
@@ -114,6 +117,36 @@ async fn submit_posts_prompt_with_stable_request_identity() {
         "01ARZ3NDEKTSV4RRFFQ69G5FAV"
     );
     assert_eq!(body["prompt"], prepared_job().workflow);
+}
+
+#[tokio::test]
+async fn submit_rejects_empty_prompt_id() {
+    let (endpoint, _) = spawn_http_sequence(vec![MockResponse {
+        status: "200 OK",
+        body: json!({"prompt_id": "  "}),
+    }])
+    .await;
+    let adapter = adapter_for(endpoint).await;
+
+    let error = adapter.submit(&prepared_job()).await.unwrap_err();
+
+    assert!(matches!(error, AdapterError::Backend(message) if message.contains("empty prompt_id")));
+}
+
+#[tokio::test]
+async fn submit_connection_drop_is_reported_as_http_uncertainty() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let request = read_http_request(&mut stream).await;
+        assert!(request.starts_with("POST /prompt HTTP/1.1"));
+    });
+    let adapter = adapter_for(endpoint).await;
+
+    let error = adapter.submit(&prepared_job()).await.unwrap_err();
+
+    assert!(matches!(error, AdapterError::Http(_)));
 }
 
 #[tokio::test]
@@ -150,6 +183,43 @@ async fn reconcile_maps_history_success_and_execution_failure() {
         .await
         .unwrap();
     assert!(matches!(failed, BackendState::Failed { message } if message.contains("CUDA OOM")));
+}
+
+#[tokio::test]
+async fn reconcile_falls_back_to_queue_when_history_is_missing() {
+    let (endpoint, mut requests) = spawn_http_sequence(vec![
+        MockResponse {
+            status: "200 OK",
+            body: json!({}),
+        },
+        MockResponse {
+            status: "200 OK",
+            body: json!({"queue_pending": [[1, "prompt-1", {}]], "queue_running": []}),
+        },
+    ])
+    .await;
+    let adapter = adapter_for(endpoint).await;
+
+    let state = adapter
+        .reconcile(&BackendJobId("prompt-1".to_owned()))
+        .await
+        .unwrap();
+
+    assert_eq!(state, BackendState::Queued);
+    assert!(
+        requests
+            .recv()
+            .await
+            .unwrap()
+            .starts_with("GET /history/prompt-1 HTTP/1.1")
+    );
+    assert!(
+        requests
+            .recv()
+            .await
+            .unwrap()
+            .starts_with("GET /queue HTTP/1.1")
+    );
 }
 
 #[tokio::test]
@@ -215,4 +285,65 @@ async fn fetch_outputs_rejects_unsafe_history_artifact() {
         .unwrap_err();
 
     assert!(matches!(error, AdapterError::UnsafeOutput(_)));
+}
+
+#[tokio::test]
+async fn download_output_writes_exact_bytes_to_staging() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+    let (request_tx, mut requests) = mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        request_tx
+            .send(read_http_request(&mut stream).await)
+            .unwrap();
+        write_response(&mut stream, "200 OK", "video/mp4", b"video-bytes").await;
+    });
+    let adapter = adapter_for(endpoint).await;
+    let directory = tempfile::tempdir().unwrap();
+    let artifact = OutputArtifact {
+        node_id: "120".to_owned(),
+        filename: "clip one.mp4".to_owned(),
+        subfolder: "shot/one".to_owned(),
+        kind: "output".to_owned(),
+    };
+
+    let downloaded = adapter
+        .download_output(&artifact, directory.path(), "take.mp4")
+        .await
+        .unwrap();
+
+    assert_eq!(downloaded.bytes, 11);
+    assert_eq!(
+        tokio::fs::read(downloaded.path).await.unwrap(),
+        b"video-bytes"
+    );
+    let request = requests.recv().await.unwrap();
+    assert!(request.starts_with("GET /view?"));
+    assert!(request.contains("filename=clip+one.mp4"));
+    assert!(request.contains("subfolder=shot%2Fone"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn download_output_rejects_symlink_staging_directory() {
+    let directory = tempfile::tempdir().unwrap();
+    let real = directory.path().join("real");
+    let linked = directory.path().join("linked");
+    std::fs::create_dir(&real).unwrap();
+    std::os::unix::fs::symlink(&real, &linked).unwrap();
+    let adapter = adapter_for("http://127.0.0.1:9/".to_owned()).await;
+    let artifact = OutputArtifact {
+        node_id: "120".to_owned(),
+        filename: "clip.mp4".to_owned(),
+        subfolder: String::new(),
+        kind: "output".to_owned(),
+    };
+
+    let error = adapter
+        .download_output(&artifact, &linked, "take.mp4")
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, AdapterError::UnsafeOutput(message) if message.contains("symlink")));
 }

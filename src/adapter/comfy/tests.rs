@@ -2,6 +2,7 @@ use super::*;
 use crate::adapter::CameraAdapter;
 
 mod http;
+mod protocol;
 
 fn workflow() -> Value {
     json!({

@@ -129,6 +129,68 @@ fn shot_selection_expands_ranges_and_rejects_ambiguous_values() {
 }
 
 #[test]
+fn shot_selection_trims_items_and_preserves_range_padding() {
+    assert_eq!(
+        expand_shot_selection(" S1-S003, CUT09 ").unwrap(),
+        ["S001", "S002", "S003", "CUT09"]
+    );
+}
+
+#[test]
+fn shot_selection_rejects_prefixless_overflow_and_malformed_ranges() {
+    for selection in ["1-3", "S01-S02-S03", "S4294967296-S4294967297", "S01-"] {
+        assert!(
+            expand_shot_selection(selection).is_err(),
+            "{selection} should be rejected"
+        );
+    }
+}
+
+#[test]
+fn shot_selection_enforces_expansion_limit() {
+    let error = expand_shot_selection("S0000-S1000").unwrap_err();
+    assert!(error.contains("beyond 1000 items"));
+}
+
+#[test]
+fn tui_refresh_interval_enforces_cli_bounds() {
+    for refresh_ms in ["99", "60001"] {
+        assert!(
+            Cli::try_parse_from(["sparkstage", "tui", "--refresh-ms", refresh_ms]).is_err(),
+            "{refresh_ms} should be outside the supported range"
+        );
+    }
+    assert!(Cli::try_parse_from(["sparkstage", "tui", "--refresh-ms", "100"]).is_ok());
+    assert!(Cli::try_parse_from(["sparkstage", "tui", "--refresh-ms", "60000"]).is_ok());
+}
+
+#[test]
+fn scoped_final_build_is_rejected_before_worker_connection() {
+    let cli = Cli::try_parse_from([
+        "sparkstage",
+        "edit",
+        "build",
+        "--project",
+        "rain-apartment",
+        "--kind",
+        "final",
+        "--shots",
+        "S01-S03",
+    ])
+    .unwrap();
+    let Command::Edit(args) = cli.command else {
+        panic!("expected edit command");
+    };
+
+    let error = execute_edit(args).unwrap_err();
+
+    assert!(matches!(
+        error,
+        CliError::InvalidInput(message) if message == "--shots is only valid with --kind draft"
+    ));
+}
+
+#[test]
 fn control_commands_parse_stable_resource_ids() {
     let queue = Cli::try_parse_from([
         "sparkstage",

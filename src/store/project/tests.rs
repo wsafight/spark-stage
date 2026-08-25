@@ -134,6 +134,7 @@ fn stale_revision_cannot_overwrite_state() {
     let mut state = store.read_state().unwrap();
     state.bump_revision("101".to_owned()).unwrap();
     store.save_state(&state, 1).unwrap();
+    let saved = fs::read(store.state_path()).unwrap();
 
     let error = store.save_state(&state, 1).unwrap_err();
     assert!(matches!(
@@ -143,6 +144,53 @@ fn stale_revision_cannot_overwrite_state() {
             actual: 2
         }
     ));
+    assert_eq!(fs::read(store.state_path()).unwrap(), saved);
+    assert_eq!(store.read_state().unwrap().revision, 2);
+}
+
+#[test]
+fn corrupt_state_is_reported_without_being_overwritten() {
+    let directory = tempfile::tempdir().unwrap();
+    let store =
+        ProjectStore::create(directory.path(), "demo", "Demo", "Brief", "create", "100").unwrap();
+    let mut replacement = store.read_state().unwrap();
+    replacement.bump_revision("101".to_owned()).unwrap();
+    let corrupt = br#"{"schema_version":"1.0","revision":#"#;
+    fs::write(store.state_path(), corrupt).unwrap();
+
+    let read_error = store.read_state().unwrap_err();
+    assert!(matches!(read_error, StoreError::Decode { .. }));
+    let save_error = store.save_state(&replacement, 1).unwrap_err();
+    assert!(matches!(save_error, StoreError::Decode { .. }));
+    assert_eq!(fs::read(store.state_path()).unwrap(), corrupt);
+}
+
+#[test]
+fn unsupported_state_schema_is_rejected_without_being_overwritten() {
+    let directory = tempfile::tempdir().unwrap();
+    let store =
+        ProjectStore::create(directory.path(), "demo", "Demo", "Brief", "create", "100").unwrap();
+    let mut replacement = store.read_state().unwrap();
+    replacement.bump_revision("101".to_owned()).unwrap();
+    let mut encoded: serde_json::Value =
+        serde_json::from_slice(&fs::read(store.state_path()).unwrap()).unwrap();
+    encoded["schema_version"] = serde_json::Value::String("999.0".to_owned());
+    let encoded = serde_json::to_vec_pretty(&encoded).unwrap();
+    fs::write(store.state_path(), &encoded).unwrap();
+
+    let read_error = store.read_state().unwrap_err();
+    assert!(matches!(
+        read_error,
+        StoreError::Invariant(crate::domain::StateInvariantError::UnsupportedSchema(ref schema))
+            if schema == "999.0"
+    ));
+    let save_error = store.save_state(&replacement, 1).unwrap_err();
+    assert!(matches!(
+        save_error,
+        StoreError::Invariant(crate::domain::StateInvariantError::UnsupportedSchema(ref schema))
+            if schema == "999.0"
+    ));
+    assert_eq!(fs::read(store.state_path()).unwrap(), encoded);
 }
 
 #[test]
