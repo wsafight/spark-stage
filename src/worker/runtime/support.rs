@@ -205,6 +205,41 @@ pub(super) fn store_failure(request: &ClientRequest, error: StoreError) -> Worke
             false,
             None,
         ),
+        StoreError::ReferenceSubjectNotFound { .. } => failure(
+            request,
+            "REFERENCE_SUBJECT_NOT_FOUND",
+            error.to_string(),
+            false,
+            None,
+        ),
+        StoreError::ReferenceNotFound(_) => failure(
+            request,
+            "REFERENCE_NOT_FOUND",
+            error.to_string(),
+            false,
+            None,
+        ),
+        StoreError::InvalidReferenceSource(_) => failure(
+            request,
+            "REFERENCE_SOURCE_INVALID",
+            error.to_string(),
+            false,
+            None,
+        ),
+        StoreError::ReferenceImpactConfirmationRequired => failure(
+            request,
+            "REFERENCE_IMPACT_CONFIRMATION_REQUIRED",
+            error.to_string(),
+            false,
+            None,
+        ),
+        StoreError::ReferenceIntegrity(_) => failure(
+            request,
+            "REFERENCE_INTEGRITY_FAILED",
+            error.to_string(),
+            false,
+            None,
+        ),
         _ => failure(request, "STORE_ERROR", error.to_string(), false, None),
     }
 }
@@ -230,6 +265,84 @@ pub(super) fn timestamp() -> String {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
     format!("{}.{:03}Z", duration.as_secs(), duration.subsec_millis())
+}
+
+impl WorkerRuntime {
+    pub(super) fn emit_milestone(
+        &self,
+        kind: MilestoneKind,
+        project_id: impl Into<String>,
+        subject_id: impl Into<String>,
+        message: impl Into<String>,
+    ) {
+        if let Some(hooks) = &self.hooks {
+            hooks.emit(MilestoneEvent::new(
+                kind,
+                project_id,
+                subject_id,
+                message,
+                timestamp(),
+            ));
+        }
+    }
+
+    pub(super) fn emit_command_milestone(&self, request: &ClientRequest, reply: &WorkerReply) {
+        let project_id = request.project_id.clone().unwrap_or_default();
+        if reply
+            .error
+            .as_ref()
+            .is_some_and(|error| error.code == "DISK_BUDGET_EXCEEDED")
+        {
+            self.emit_milestone(
+                MilestoneKind::DiskBlocked,
+                project_id,
+                request.command_id.clone(),
+                reply
+                    .error
+                    .as_ref()
+                    .map_or_else(String::new, |error| error.message.clone()),
+            );
+            return;
+        }
+        if !reply.ok {
+            return;
+        }
+        if matches!(request.command, WorkerCommand::ApplyScript { .. })
+            || reply
+                .message
+                .as_ref()
+                .is_some_and(|message| message.contains("budget approval"))
+        {
+            let approval_id = reply
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.pending_approvals.last())
+                .map_or_else(
+                    || request.command_id.clone(),
+                    |approval| approval.approval_id.clone(),
+                );
+            self.emit_milestone(
+                MilestoneKind::ApprovalRequired,
+                project_id,
+                approval_id,
+                reply.message.clone().unwrap_or_default(),
+            );
+        } else if matches!(request.command, WorkerCommand::Approve { .. })
+            && reply.snapshot.as_ref().is_some_and(|snapshot| {
+                matches!(
+                    snapshot.project.outcome.as_str(),
+                    "done" | "done_with_warnings"
+                )
+            })
+        {
+            self.emit_milestone(
+                MilestoneKind::ProjectCompleted,
+                project_id,
+                request.command_id.clone(),
+                "project completed",
+            );
+        }
+    }
 }
 
 pub(super) fn recovery_project_id(request: &ClientRequest) -> Option<String> {
@@ -273,6 +386,11 @@ pub(super) const fn command_kind(command: &WorkerCommand) -> &'static str {
         WorkerCommand::RestoreCleanupPlan { .. } => "storage.restore",
         WorkerCommand::ReviewBatch { .. } => "take.review_batch",
         WorkerCommand::DecisionHistory { .. } => "history.decisions",
+        WorkerCommand::ListReferences => "reference.list",
+        WorkerCommand::ReferenceImpact { .. } => "reference.impact",
+        WorkerCommand::ImportReference { .. } => "reference.import",
+        WorkerCommand::ReplaceReference { .. } => "reference.replace",
+        WorkerCommand::VerifyReferences => "reference.verify",
         WorkerCommand::ApplyScript { .. } => "script.apply",
         WorkerCommand::ApproveScript => "script.approve",
         WorkerCommand::Approve { .. } => "approval.approve",

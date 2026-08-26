@@ -36,6 +36,50 @@ pub(super) fn initial_shot_state(
     }
 }
 
+pub(super) fn shot_generation_equal(
+    previous: &crate::domain::ShotContract,
+    next: &crate::domain::ShotContract,
+) -> bool {
+    previous.id == next.id
+        && previous.duration == next.duration
+        && previous.width == next.width
+        && previous.height == next.height
+        && previous.fps == next.fps
+        && previous.operation == next.operation
+        && previous.characters == next.characters
+        && previous.location == next.location
+        && previous.camera == next.camera
+        && previous.conditioning == next.conditioning
+        && previous.continuity == next.continuity
+        && previous.generation_plan == next.generation_plan
+        && previous.prompt == next.prompt
+}
+
+pub(super) fn bible_change_affects_shot(
+    previous: &ScriptBundle,
+    next: &ScriptBundle,
+    shot: &crate::domain::ShotContract,
+) -> bool {
+    if previous.bible.style != next.bible.style {
+        return true;
+    }
+    let character_changed = shot.characters.iter().any(|id| {
+        previous.bible.characters.iter().find(|item| &item.id == id)
+            != next.bible.characters.iter().find(|item| &item.id == id)
+    });
+    character_changed
+        || previous
+            .bible
+            .locations
+            .iter()
+            .find(|item| item.id == shot.location)
+            != next
+                .bible
+                .locations
+                .iter()
+                .find(|item| item.id == shot.location)
+}
+
 pub(super) fn ensure_revision(
     state: &ProjectState,
     expected_revision: u64,

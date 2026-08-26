@@ -86,6 +86,18 @@ pub enum StoreError {
     CleanupPlanStale(String),
     #[error("cleanup path conflict at `{0}`")]
     CleanupPathConflict(PathBuf),
+    #[error("reference subject `{kind}:{id}` does not exist in the active contract")]
+    ReferenceSubjectNotFound { kind: String, id: String },
+    #[error("reference `{0}` does not exist")]
+    ReferenceNotFound(String),
+    #[error("reference source is invalid: {0}")]
+    InvalidReferenceSource(String),
+    #[error(
+        "reference change affects existing production artifacts; inspect impact and accept it explicitly"
+    )]
+    ReferenceImpactConfirmationRequired,
+    #[error("reference `{0}` failed integrity verification")]
+    ReferenceIntegrity(String),
 }
 
 pub(crate) fn io_error(path: impl Into<PathBuf>, source: std::io::Error) -> StoreError {

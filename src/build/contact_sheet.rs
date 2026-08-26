@@ -122,10 +122,13 @@ mod tests {
                 workflow_hash: "workflow".to_owned(),
                 model_fingerprint: "model".to_owned(),
                 seed: 42,
+                reference_subjects: Vec::new(),
+                reference_fingerprint: String::new(),
                 warnings: Vec::new(),
                 first_frame_path,
                 trim_seconds: None,
             }],
+            subtitles: None,
             output_path: PathBuf::from("builds/BLD-contact/output.mp4"),
             delivery_path: PathBuf::from("review/draft-cut.mp4"),
         }

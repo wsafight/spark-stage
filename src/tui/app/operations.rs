@@ -233,6 +233,9 @@ impl<B: TuiBackend> App<B> {
                 self.decisions = decisions;
                 self.clamp_selection(Page::History);
             }
+            WorkerPayload::ReferenceList { .. }
+            | WorkerPayload::ReferenceImpact(_)
+            | WorkerPayload::ReferenceVerification(_) => {}
         }
     }
 }

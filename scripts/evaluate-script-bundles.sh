@@ -1,4 +1,6 @@
 #!/bin/sh
 set -eu
 
-cargo test --lib validation::tests::external_agent_script_bundles_match_checked_in_expectations -- --exact
+cargo run --quiet -- script evaluate \
+  --suite tests/fixtures/agent-script-bundles/expectations.json \
+  --output target/script-bundle-evaluation.json

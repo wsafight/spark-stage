@@ -280,13 +280,56 @@ impl WorkerRuntime {
         state.recent_failures.push(failure);
         state.bump_revision(now).map_err(StoreError::Invariant)?;
         store.save_state(&state, expected_revision)?;
-        self.touch_queue_revision()
+        self.touch_queue_revision()?;
+        self.emit_milestone(
+            MilestoneKind::CameraFailed,
+            entry.project_id.clone(),
+            entry.job_id.clone(),
+            message.to_owned(),
+        );
+        Ok(())
     }
 
     pub(super) fn apply_executor_event(
         &mut self,
         event: ExecutorEvent,
     ) -> Result<Option<ExecutorRequest>, WorkerRunError> {
+        let project_id = self
+            .queue
+            .running
+            .as_ref()
+            .map(|entry| entry.project_id.clone())
+            .unwrap_or_default();
+        let milestone = match &event {
+            ExecutorEvent::Completed { job_id, .. } => Some((
+                MilestoneKind::TakeReady,
+                job_id.clone(),
+                "camera take is ready for review".to_owned(),
+            )),
+            ExecutorEvent::OutputInvalid {
+                job_id,
+                code,
+                message,
+                ..
+            }
+            | ExecutorEvent::PreparationFailed {
+                job_id,
+                code,
+                message,
+                ..
+            } => Some((
+                MilestoneKind::CameraFailed,
+                job_id.clone(),
+                format!("{code}: {message}"),
+            )),
+            ExecutorEvent::BackendFailed {
+                job_id, message, ..
+            }
+            | ExecutorEvent::SubmissionUnknown {
+                job_id, message, ..
+            } => Some((MilestoneKind::CameraFailed, job_id.clone(), message.clone())),
+            _ => None,
+        };
         let changes_state = !matches!(&event, ExecutorEvent::Cancelled { .. });
         let queue_revision = self.queue.revision;
         let result: Result<Option<ExecutorRequest>, WorkerRunError> = match event {
@@ -445,6 +488,9 @@ impl WorkerRuntime {
         let next_request = result?;
         if changes_state && self.queue.revision == queue_revision {
             self.touch_queue_revision()?;
+        }
+        if let Some((kind, subject_id, message)) = milestone {
+            self.emit_milestone(kind, project_id, subject_id, message);
         }
         Ok(next_request)
     }

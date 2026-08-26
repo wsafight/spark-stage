@@ -185,6 +185,8 @@ pub struct ProjectState {
     #[serde(default)]
     pub builds: BTreeMap<String, BuildRecord>,
     #[serde(default)]
+    pub references: BTreeMap<String, ReferenceAsset>,
+    #[serde(default)]
     pub recent_failures: Vec<FailureRecord>,
     #[serde(default)]
     pub budget: ProjectBudget,
@@ -212,6 +214,7 @@ impl ProjectState {
             shots: BTreeMap::new(),
             takes: BTreeMap::new(),
             builds: BTreeMap::new(),
+            references: BTreeMap::new(),
             recent_failures: Vec::new(),
             budget: ProjectBudget::default(),
             created_at: now.clone(),
@@ -306,6 +309,27 @@ impl ProjectState {
                     key: key.clone(),
                     take_id: take.take_id.clone(),
                 });
+            }
+        }
+        for (key, reference) in &self.references {
+            if key != &reference.reference_id {
+                return Err(StateInvariantError::ReferenceKeyMismatch {
+                    key: key.clone(),
+                    reference_id: reference.reference_id.clone(),
+                });
+            }
+            if reference.sha256.len() != 64
+                || reference.bytes == 0
+                || reference.relative_path.as_os_str().is_empty()
+                || reference.relative_path.is_absolute()
+                || reference
+                    .relative_path
+                    .components()
+                    .any(|component| !matches!(component, std::path::Component::Normal(_)))
+            {
+                return Err(StateInvariantError::ReferenceInvalid(
+                    reference.reference_id.clone(),
+                ));
             }
         }
         for (key, shot) in &self.shots {
@@ -526,6 +550,31 @@ pub struct BibleEntry {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum ReferenceSubjectKind {
+    Character,
+    Location,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReferenceAsset {
+    pub reference_id: String,
+    pub subject_kind: ReferenceSubjectKind,
+    pub subject_id: String,
+    pub relative_path: PathBuf,
+    pub sha256: String,
+    pub bytes: u64,
+    pub original_file_name: String,
+    pub active: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersedes: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum JobState {
     Queued,
     Active,
@@ -716,6 +765,10 @@ pub enum StateInvariantError {
     ShotKeyMismatch { key: String, shot_id: String },
     #[error("take map key `{key}` does not match take id `{take_id}`")]
     TakeKeyMismatch { key: String, take_id: String },
+    #[error("reference map key `{key}` does not match reference id `{reference_id}`")]
+    ReferenceKeyMismatch { key: String, reference_id: String },
+    #[error("reference `{0}` has invalid immutable metadata")]
+    ReferenceInvalid(String),
     #[error("shot `{shot_id}` lists take `{take_id}` more than once")]
     DuplicateShotTake { shot_id: String, take_id: String },
     #[error("shot `{shot_id}` lists missing take `{take_id}`")]

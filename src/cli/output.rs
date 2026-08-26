@@ -72,6 +72,36 @@ pub(super) fn print_reply(reply: &WorkerReply, machine_readable: bool) -> Result
                     );
                 }
             }
+            WorkerPayload::ReferenceList { references } => {
+                for reference in references {
+                    println!(
+                        "{}: {:?}:{}, active={}, bytes={}, sha256={}, path={}",
+                        reference.reference_id,
+                        reference.subject_kind,
+                        reference.subject_id,
+                        reference.active,
+                        reference.bytes,
+                        reference.sha256,
+                        reference.relative_path.display()
+                    );
+                }
+            }
+            WorkerPayload::ReferenceImpact(impact) => {
+                println!(
+                    "{:?}:{}: shots={}, takes={}, builds={}",
+                    impact.subject_kind,
+                    impact.subject_id,
+                    impact.affected_shot_ids.join(","),
+                    impact.affected_take_ids.join(","),
+                    impact.affected_build_ids.join(",")
+                );
+            }
+            WorkerPayload::ReferenceVerification(report) => {
+                println!(
+                    "references verified: total={}, active={}, bytes={}",
+                    report.references, report.active_references, report.bytes
+                );
+            }
         }
     }
     if let Some(snapshot) = &reply.snapshot {

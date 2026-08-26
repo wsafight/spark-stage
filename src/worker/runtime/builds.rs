@@ -152,6 +152,16 @@ impl WorkerRuntime {
                 error = Some(validation.to_string());
                 stale = true;
             }
+            let milestone = if output.is_some() {
+                (MilestoneKind::BuildCompleted, "build completed".to_owned())
+            } else {
+                (
+                    MilestoneKind::BuildFailed,
+                    error
+                        .clone()
+                        .unwrap_or_else(|| "build failed without diagnostics".to_owned()),
+                )
+            };
             store.finish_build(
                 &request.recipe.build_id,
                 output,
@@ -161,6 +171,12 @@ impl WorkerRuntime {
                 &request.command_id,
                 &timestamp(),
             )?;
+            self.emit_milestone(
+                milestone.0,
+                request.project_id.clone(),
+                request.recipe.build_id.clone(),
+                milestone.1,
+            );
             changed = true;
         }
     }

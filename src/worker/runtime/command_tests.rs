@@ -182,10 +182,13 @@ fn startup_resumes_running_build_recipe_and_persists_failure() {
             workflow_hash: "workflow".to_owned(),
             model_fingerprint: "model".to_owned(),
             seed: 1,
+            reference_subjects: Vec::new(),
+            reference_fingerprint: String::new(),
             warnings: Vec::new(),
             first_frame_path: None,
             trim_seconds: None,
         }],
+        subtitles: None,
         output_path: PathBuf::from("builds/BLD-recovery/output.mp4"),
         delivery_path: PathBuf::from("review/draft-cut.mp4"),
     };

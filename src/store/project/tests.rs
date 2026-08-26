@@ -292,10 +292,13 @@ fn changing_selected_take_marks_affected_build_stale() {
                 workflow_hash: first.workflow_hash.clone(),
                 model_fingerprint: first.model_fingerprint.clone(),
                 seed: first.seed,
+                reference_subjects: Vec::new(),
+                reference_fingerprint: String::new(),
                 warnings: Vec::new(),
                 first_frame_path: None,
                 trim_seconds: None,
             }],
+            subtitles: None,
             output_path: PathBuf::from("builds/BLD-selection/output.mp4"),
             delivery_path: PathBuf::from("review/draft-cut.mp4"),
         },
@@ -409,6 +412,102 @@ fn replacement_bundle_cannot_be_approved_while_a_shot_job_is_active() {
         store.read_state().unwrap().active_contract_id,
         Some(job.contract_id)
     );
+}
+
+#[test]
+fn dialogue_only_contract_change_keeps_raw_takes_and_stales_builds() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut bundle = validate_json(BUNDLE).bundle.unwrap();
+    let store = ProjectStore::create(
+        directory.path(),
+        &bundle.project.id,
+        &bundle.project.title,
+        "brief",
+        "create",
+        "100",
+    )
+    .unwrap();
+    let (_, approval) = store.apply_bundle(&bundle, 1, "apply", "101").unwrap();
+    let mut state = store
+        .approve_script(Some(&approval.approval_id), 2, "approve", "102")
+        .unwrap();
+    let take_id = "TAKE-dialogue";
+    state
+        .takes
+        .insert(take_id.to_owned(), take(take_id, "S01", false));
+    state
+        .shots
+        .get_mut("S01")
+        .unwrap()
+        .take_ids
+        .push(take_id.to_owned());
+    let build_id = "BLD-dialogue";
+    let recipe_path = PathBuf::from("builds/BLD-dialogue/recipe.json");
+    write_json_atomic(
+        &store.root().join(&recipe_path),
+        &crate::build::BuildRecipe {
+            schema_version: crate::build::BUILD_RECIPE_SCHEMA_VERSION.to_owned(),
+            build_id: build_id.to_owned(),
+            project_id: state.project_id.clone(),
+            contract_id: state.active_contract_id.clone(),
+            contract_hash: state.contracts[state.active_contract_id.as_ref().unwrap()]
+                .bundle_hash
+                .clone(),
+            source_revision: state.revision,
+            kind: crate::build::BuildKind::Draft,
+            width: 960,
+            height: 544,
+            fps: 24,
+            expected_duration_seconds: 5,
+            inputs: vec![crate::build::BuildInput {
+                shot_id: "S01".to_owned(),
+                take_id: take_id.to_owned(),
+                media_path: PathBuf::from("raw/S01/TAKE-dialogue.mp4"),
+                profile: "audition".to_owned(),
+                input_hash: "input".to_owned(),
+                adapter_fingerprint: "adapter".to_owned(),
+                workflow_hash: "workflow".to_owned(),
+                model_fingerprint: "model".to_owned(),
+                seed: 1,
+                reference_subjects: Vec::new(),
+                reference_fingerprint: String::new(),
+                warnings: Vec::new(),
+                first_frame_path: None,
+                trim_seconds: None,
+            }],
+            subtitles: None,
+            output_path: PathBuf::from("builds/BLD-dialogue/output.mp4"),
+            delivery_path: PathBuf::from("review/draft-cut.mp4"),
+        },
+    )
+    .unwrap();
+    state.builds.insert(
+        build_id.to_owned(),
+        crate::domain::BuildRecord {
+            build_id: build_id.to_owned(),
+            kind: "draft".to_owned(),
+            status: "needs_review".to_owned(),
+            recipe: recipe_path.to_string_lossy().into_owned(),
+            command_id: "build".to_owned(),
+            output_path: Some(PathBuf::from("builds/BLD-dialogue/output.mp4")),
+            warnings: Vec::new(),
+            stale: false,
+        },
+    );
+    state.bump_revision("103".to_owned()).unwrap();
+    store.save_state(&state, 3).unwrap();
+
+    bundle.shots[0].dialogue[0].text = "替换后的字幕对白。".to_owned();
+    let (_, approval) = store
+        .apply_bundle(&bundle, 4, "apply-dialogue", "104")
+        .unwrap();
+    let changed = store
+        .approve_script(Some(&approval.approval_id), 5, "approve-dialogue", "105")
+        .unwrap();
+
+    assert!(!changed.takes[take_id].stale);
+    assert!(!changed.shots["S01"].stale);
+    assert!(changed.builds[build_id].stale);
 }
 
 #[test]

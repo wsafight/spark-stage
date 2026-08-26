@@ -8,6 +8,9 @@
       "shots": 3,
       "duration_seconds": 15,
       "agent_host": "fixture-agent-alpha",
+      "model": "external-model-alpha",
+      "quality_sample": true,
+      "repair_count": 0,
       "issue_codes": []
     },
     {
@@ -17,6 +20,9 @@
       "shots": 2,
       "duration_seconds": 12,
       "agent_host": "fixture-agent-beta",
+      "model": "external-model-beta",
+      "quality_sample": true,
+      "repair_count": 0,
       "issue_codes": []
     },
     {
@@ -26,6 +32,9 @@
       "shots": null,
       "duration_seconds": null,
       "agent_host": null,
+      "model": null,
+      "quality_sample": false,
+      "repair_count": 0,
       "issue_codes": ["JSON_CONTRACT"]
     }
   ]

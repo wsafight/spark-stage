@@ -153,9 +153,10 @@ OpenMontage 的方向对，默认假设不对：它面向云厂商、库存素�
 │   ├── shots.json             # 原子分镜
 │   └── authoring.json         # skill / schema / Agent 信息与输入输出 hash
 ├── refs/
-│   ├── characters/            # 过审定妆
-│   ├── locations/             # 过审场景板
-│   └── shots/                 # 可选的镜头首帧 / 目标尾帧
+│   ├── character/zhao/        # 不可变角色参考与替换历史
+│   │   └── REF-....png
+│   └── location/apartment-living-room/
+│       └── REF-....png
 ├── raw/
 │   └── S06/
 │       ├── S06-T001.mp4
@@ -163,6 +164,8 @@ OpenMontage 的方向对，默认假设不对：它面向云厂商、库存素�
 ├── jobs/                      # 投递前先落盘的 job journal，供崩溃恢复
 ├── review/
 │   ├── draft-cut.mp4
+│   ├── draft-cut.srt
+│   ├── draft-cut.vtt
 │   ├── contact-sheet.jpg
 │   ├── report.md
 │   ├── S06/
@@ -170,7 +173,10 @@ OpenMontage 的方向对，默认假设不对：它面向云厂商、库存素�
 │   │   ├── S06-T001-last.jpg
 │   │   └── S06-T001-handoff.jpg
 │   └── boundaries/            # 相邻镜头首尾帧对照
-├── final/                     # 成片
+├── builds/<build-id>/         # 不可变 recipe、字幕、联系表和报告
+│   ├── subtitles.srt
+│   └── subtitles.vtt
+├── final/                     # 成片及同名 SRT/VTT 交付副本
 ├── history/                   # 被新版本替代的合同和状态快照
 ├── state.json                 # 当前阶段、镜头状态和选择 / 审批结果
 ├── decisions.jsonl            # 追加式决策与人工审批历史
@@ -226,8 +232,11 @@ MVP 交付 skill，不维护另一份孤立的“万能 prompt”。`screenwrite
 
 ```
 final/<project>.mp4              # 正片
+final/<project>.srt              # 正片对白字幕
+final/<project>.vtt              # WebVTT 交付副本
 final/<project>-trailer.mp4      # 要求预告时生成
 review/draft-cut.mp4             # 由选中小样组成的低规格动态草稿
+review/draft-cut.{srt,vtt}       # 草稿范围内的确定性对白字幕
 review/contact-sheet.jpg         # 全片分镜缩略图
 review/report.md                 # 候选选择、晋级血缘、质量状态和遗留问题
 state.json                       # 可续跑的当前状态
@@ -269,8 +278,10 @@ state.json                       # 可续跑的当前状态
 | 打开终端控制台 | `sparkstage tui` |
 | 用 brief 建项目 | `sparkstage project new --brief-file brief.md` |
 | 校验 / 导入 Agent 文案包 | `sparkstage script validate bundle.json`、`sparkstage script apply bundle.json` |
+| 评测外部 Agent 文案包集合 | `sparkstage script evaluate --suite expectations.json --output report.json` |
 | 批准文案包 | `sparkstage script approve` |
 | 查看项目 | `sparkstage project status` |
+| 查看 / 导入 / 替换参考素材 | `sparkstage refs list --project <id>`、`sparkstage refs impact --project <id> --kind character --id zhao`、`sparkstage refs import/replace` |
 | 给指定镜头抽低成本小样 | `sparkstage shots audition S04-S07 --takes 3` |
 | 选中候选并晋级 | `sparkstage shots promote S06 --take S06-T002` |
 | 直接拍全部或指定镜头 | `sparkstage shots render`、`sparkstage shots render S04-S07` |
@@ -279,6 +290,7 @@ state.json                       # 可续跑的当前状态
 | 处理通用审批 | `sparkstage approval approve --project <id> --approval <approval-id>` |
 | 刷新诊断 / 查看日志 | `sparkstage diagnostics retry --project <id> --probe worker`、`sparkstage logs open --project <id>` |
 | 拼局部动态草稿、全片正片或预告 | `sparkstage edit build --kind draft --shots S04-S07`、`sparkstage edit build --kind final`、`sparkstage edit trailer` |
+| 配置本机里程碑 hook | `sparkstage notifications default/validate/apply/show/disable` |
 | 看占盘 / 安全清理 | `sparkstage storage status`、`sparkstage storage clean --dry-run` |
 
 Agent 可以替用户调用这些命令，但不能绕开命令面直接改运行态文件。
@@ -309,9 +321,9 @@ TUI 首屏固定展示项目阶段、GPU 当前任务、队列、预算、待审
 
 ### 5.10 只在里程碑通知
 
-用户离开机器后，系统只在以下节点通知：第一组候选可选、必须人工决定、任务恢复失败、动态草稿完成、正式成片完成。默认通知是终端状态和本机事件；v1 可增加本机桌面通知或用户配置的命令 hook，不默认接外部消息服务。
+用户离开机器后，系统只发七类已提交的本机里程碑：需要审批、take 可审、摄影机失败、build 完成、build 失败、磁盘阻断和项目完成。默认仍以终端状态为准；用户可通过 `notifications default/validate/apply/show/disable` 安装命令 hook，worker 也可用 `--hook-config` 临时指定配置。产品不默认连接外部消息服务。
 
-通知只是提示，不能充当状态。用户错过、重复收到或关闭通知，都不影响 `state.json` 和审批门；单个镜头的每一步进度不发送通知，避免十镜任务刷屏。
+通知只是提示，不能充当状态。用户错过、重复收到、关闭通知或 hook 执行失败，都不影响 `state.json` 和审批门。hook 在独立串行线程执行，不经 shell、不继承父进程环境，事件 JSON 从 stdin 输入；可执行文件必须是绝对路径的非 symlink 普通文件。单个镜头的内部步骤不发送通知，避免十镜任务刷屏。
 
 ### 5.11 项目预算不是只有钱
 
@@ -331,6 +343,7 @@ TUI 首屏固定展示项目阶段、GPU 当前任务、队列、预算、待审
 - `preflight` 输出每个 adapter 的能力矩阵，不把云端 H3 的能力误认为本机工作流能力
 - 项目创建 / 列状态 / 停 / 续
 - 版本化 `screenwriter` skill、`ScriptBundle` schema，以及 `script validate / apply / approve` 闭环；不在 DGX 运行文案模型
+- `script evaluate` 对 checked-in 或外部采集 bundle 生成首次通过、修复次数、issue code 和 Agent/model 的稳定 JSON 报告
 - 快速模式 / 导演模式，以及必须停下来问人的审批门
 - 分镜 JSON 为唯一拍摄合同
 - 摄影机 adapter：先接本机 Comfy，接口留成可换
@@ -346,25 +359,25 @@ TUI 首屏固定展示项目阶段、GPU 当前任务、队列、预算、待审
 - 输出缩略图总览和审片报告，区分完成、带警告完成、待审
 - 追加式决策历史和结构化事件流
 - 基础 stale 规则：某镜合同变化只标记该镜和相关成片，不删除旧 take
+- 角色/地点参考素材的不可变导入、替换历史、SHA-256 校验、影响预览与精确 take/build stale 传播
+- 从对白合同确定性生成 SRT/VTT；局部 draft 只交付所选镜头字幕，字幕来源和文件 hash 冻结进 build recipe
+- 七类本机里程碑事件和安全命令 hook，不经 shell、不阻塞 worker/GPU 调度
 - `storage status` 和只预演不删除的安全清理计划
 - 脚本 / 提示词内容门：拒绝未成年人、真实公众人物脸和过度暴力；输出画面在 `playable` / `done` 前强制人工过目
 
 ### 6.2 紧接着要有（v1）
 
-没有这些，短剧会一直「能出不能认」：
+参考素材管理、精确 stale、对白字幕和本机命令 hook 已提前进入 MVP；v1 剩余重点是素材生成、真实参考生视频和视觉审片：
 
 - 角色卡 / 场景板自动出图，过审后改名进 refs
 - 参考生视频身份锁，大头裁切；能力不支持时停止并说明，不静默降级纯文生
 - 普通镜头可锁首帧；连续动作或匹配剪辑可选锁目标尾帧
 - 候选晋级可按能力使用 `enhance`、`video_reference` 或 `frame_reference`，并保留 parent take
-- bible、参考素材和成片配方变化沿依赖关系精确传播 stale
 - 审片技能：抽帧检查人数、服装、幼态和画面脏字；只有已验证的检查器才参与自动选择
 - 边界审片：检查相邻镜头的身份、服装、道具、视线、运动方向和色温
 - 重拍策略：改种子 / 改提示词 / 改参考图 / 降分辨率，有上限
-- 对白表：每镜零到多句原文，编剧阶段先通过时长预算，后期可烧字幕
 - 预告轨和正片轨两套成片配方
 - 本机审片页：看缩略图、切换 take、通过、重拍、接受警告；不做时间线
-- 本机里程碑通知或用户配置的命令 hook
 
 ### 6.3 以后再有（v2）
 
@@ -502,10 +515,11 @@ TUI 使用 Ratatui + Crossterm，是队列与审批控制台，不承担准确�
 
 | 变化 | 自动标记为 `stale` | 保留什么 |
 | --- | --- | --- |
-| 某镜 prompt、首尾帧或参考输入变化 | 该镜现有 take、边界审片、相关成片 | 原 take 和审批历史，不自动删除 |
+| 某镜 prompt、首尾帧或 conditioning 变化 | 该镜现有 take、边界审片、相关成片 | 原 take 和审批历史，不自动删除 |
 | 只用新 seed 或 profile 增加一次重拍 | 不自动 stale 旧 take；生成并比较新 take | 旧选择和审批，直到用户改选 |
 | 角色、服装、地点或风格 bible 变化 | 所有引用它的镜头；已过审镜头进入人工确认 | 不相关镜头和旧 bible 快照 |
-| 原生对白文本变化 | 该镜视频、字幕和成片 | 其它镜头 |
+| 角色或地点参考素材替换 | 只失效引用该 subject 的非 stale take 和包含这些镜头的 build | 旧参考文件、替换链及不相关镜头 |
+| `dialogue[].who/text` 变化 | 包含该镜的字幕与 build | 已过审 raw take 和其它镜头 |
 | 镜头顺序、trim、字幕或音乐变化 | 成片配方和 final | 已过审 raw |
 | 主宽高比或分辨率变化 | 所有不满足新规格的镜头和 final | 原规格版本 |
 | 默认 adapter / workflow 变化 | 不自动否定旧 take；新 take 使用新指纹 | 混用情况写进报告，用户可要求全量重拍 |
@@ -808,13 +822,13 @@ S06 已自动重拍 2 次，仍有 FACE_DRIFT。
 10. Ratatui 控制台复用同一 worker 命令面，完成队列、候选、审批、失败和预算操作
 11. 《雨夜公寓》作为第一个 project 挂上，先三镜试拍再完整十镜
 
-截至 2026-08-26，以上控制面、合同、worker/IPC、持久队列、take/build 状态、媒体检查、预算、Ratatui、清理恢复、决策历史和 mock ComfyUI 错误路径已有无 GPU 实现与测试；基础项目归档/导入和 schema 迁移也已提前完成。第 3、4、6、7、8、11 项中依赖真实 H3 workflow、音轨、画质、耗时和 DGX 环境的部分仍未验收，不能因 mock 或合成媒体测试通过而视为完成。
+截至 2026-08-26，以上控制面、合同、worker/IPC、持久队列、take/build 状态、媒体检查、参考素材与精确失效、SRT/VTT、外部 Agent 评测报告、本机里程碑 hook、预算、Ratatui、清理恢复、决策历史和 mock ComfyUI 错误路径已有无 GPU 实现与测试；基础项目归档/导入和 schema 迁移也已提前完成。第 3、4、6、7、8、11 项中依赖真实 H3 workflow、音轨、画质、耗时和 DGX 环境的部分仍未验收，不能因 mock 或合成媒体测试通过而视为完成。
 
-**MVP 完成定义**：外部 Agent 用 `screenwriter` skill 从一句 brief 生成通过校验且经批准的文案包，再用低成本候选拼出《雨夜公寓》动态草稿；选中候选后晋级并无人值守生成预告和终片候选。此时项目保持 `needs_review`，必须经过一次全片人工画面确认才能成为 `playable` / `done`。磁盘上出现文案来源记录、两个视频候选、一张缩略图总览、一组边界对照和一份可追溯审片报告。中途重启一次仍能续跑，CLI 和 TUI 看到同一状态，过程不用手改代码、workflow JSON 或状态文件。
+**MVP 完成定义**：外部 Agent 用 `screenwriter` skill 从一句 brief 生成通过校验且经批准的文案包，再用低成本候选拼出《雨夜公寓》动态草稿；选中候选后晋级并无人值守生成预告和终片候选。此时项目保持 `needs_review`，必须经过一次全片人工画面确认才能成为 `playable` / `done`。磁盘上出现文案来源记录、两个视频候选、SRT/VTT、一张缩略图总览、一组边界对照和一份可追溯审片报告。中途重启一次仍能续跑，CLI 和 TUI 看到同一状态，过程不用手改代码、workflow JSON 或状态文件。
 
 ### v1
 
-bible + 定妆 + 本机能力验证后的 I2V / FLF2V + 身份参考 + 自动边界审片 + 精确 stale 传播 + 对白字幕 + 本机审片页 + 安全存储清理。
+bible + 定妆素材生成 + 本机能力验证后的 I2V / FLF2V + 身份参考生视频 + 自动边界审片 + 本机审片页 + 更完整的安全存储生命周期。
 
 完成定义：同一对角色拍两部短片，脸还认得出来；改变一张角色参考图时，只标记真正受影响的镜头，不破坏其它已过审 take。
 
@@ -940,13 +954,13 @@ MVP 不是跑通一次《雨夜公寓》就算成功。第一轮必须完成 3 �
 
 ## 15. 下一步（从 DGX 对接开始）
 
-无需 DGX 的控制面基线已经完成：Rust/worker/IPC、Ratatui 10 页控制台、预算和审批、崩溃恢复、可恢复清理、项目归档迁移、CI/覆盖率/依赖审计，以及两套独立 ScriptBundle 回归夹具。接下来按以下顺序只补真实生产证据：
+无需 DGX 的控制面基线已经完成：Rust/worker/IPC、Ratatui 10 页控制台、参考素材与精确失效、SRT/VTT、外部 Agent suite 评测、本机里程碑 hook、预算和审批、崩溃恢复、可恢复清理、项目归档迁移、CI/覆盖率/依赖审计，以及两套独立 ScriptBundle 回归夹具。接下来按以下顺序只补真实生产证据：
 
 1. 在 DGX Spark 导出当前 MiniMax H3 ComfyUI API workflow，逐项填写 prompt、seed、输出、首帧、尾帧、参考素材和音频 binding；生成的 adapter 先保持 disabled。
 2. 执行最小 T2V 烟测并保存 capability report；I2V / FLF2V / R2V 分别独立验证，未通过的能力保持禁用，不做静默降级。
 3. 用生产 worker/adapter 跑冷启动和稳态 baseline，再单变量比较 audition/final、attention、compile、cache 和 FP8；用结果替换 `unmeasured_default_v1` 预算参数。
 4. 用真实输出执行首尾/接力帧、音轨、黑帧/静帧/静音、两镜 build、联系表和血缘报告验收；标准 FFmpeg 的合成媒体 CI 是前置回归，不替代 H3 素材验收。
-5. 让至少两个真实外部 Agent 会话各生成完整十镜 ScriptBundle，记录首次通过率和修复次数；checked-in fixture 只保证合同回归，不冒充模型质量评测。
+5. 让至少两个真实外部 Agent 会话各生成完整十镜 ScriptBundle，用 `script evaluate` 记录首次通过率、修复次数和 Agent/model 分布；checked-in fixture 只保证评测合同回归，不冒充模型总体质量。
 6. 把《雨夜公寓》挂成第一个真实 project：三镜试拍 → 小样抽卡 → 动态草稿 → 晋级十镜终片候选，完整演练中断恢复、预算超限、单镜重拍和最终人工画面 gate。
 7. 完成 3 部 / 30 镜产品验证后再进入 v1 身份锁、自动审片和本机审片页；Tauri 桌面壳继续由真实内测反馈决定。
 

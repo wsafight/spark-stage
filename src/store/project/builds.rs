@@ -13,7 +13,7 @@ fn build_is_active(build: &BuildRecord) -> bool {
     matches!(build.status.as_str(), "queued" | "running")
 }
 
-fn mark_build_ids_stale(state: &mut ProjectState, stale_ids: &[String]) {
+pub(super) fn mark_build_ids_stale(state: &mut ProjectState, stale_ids: &[String]) {
     for build_id in stale_ids {
         if let Some(build) = state.builds.get_mut(build_id) {
             build.stale = true;
@@ -31,6 +31,34 @@ fn mark_build_ids_stale(state: &mut ProjectState, stale_ids: &[String]) {
 }
 
 impl ProjectStore {
+    pub(super) fn build_ids_for_shots(
+        &self,
+        state: &ProjectState,
+        changed_shots: &HashSet<String>,
+    ) -> Vec<String> {
+        state
+            .builds
+            .values()
+            .filter(|build| !build.stale)
+            .filter_map(|build| {
+                let path = PathBuf::from(&build.recipe);
+                if !valid_project_relative_path(&path) {
+                    return Some(build.build_id.clone());
+                }
+                let recipe: crate::build::BuildRecipe =
+                    match crate::store::read_json(&self.root.join(path)) {
+                        Ok(recipe) => recipe,
+                        Err(_) => return Some(build.build_id.clone()),
+                    };
+                recipe
+                    .inputs
+                    .iter()
+                    .any(|input| changed_shots.contains(&input.shot_id))
+                    .then(|| build.build_id.clone())
+            })
+            .collect()
+    }
+
     pub(super) fn mark_builds_stale_for_decision(
         &self,
         state: &mut ProjectState,
@@ -68,30 +96,16 @@ impl ProjectStore {
         changed_shots: &HashSet<String>,
         delivery_changed: bool,
     ) {
-        let stale_ids = state
-            .builds
-            .values()
-            .filter(|build| !build.stale)
-            .filter_map(|build| {
-                if delivery_changed {
-                    return Some(build.build_id.clone());
-                }
-                let path = PathBuf::from(&build.recipe);
-                if !valid_project_relative_path(&path) {
-                    return Some(build.build_id.clone());
-                }
-                let recipe: crate::build::BuildRecipe =
-                    match crate::store::read_json(&self.root.join(path)) {
-                        Ok(recipe) => recipe,
-                        Err(_) => return Some(build.build_id.clone()),
-                    };
-                recipe
-                    .inputs
-                    .iter()
-                    .any(|input| changed_shots.contains(&input.shot_id))
-                    .then(|| build.build_id.clone())
-            })
-            .collect::<Vec<_>>();
+        let stale_ids = if delivery_changed {
+            state
+                .builds
+                .values()
+                .filter(|build| !build.stale)
+                .map(|build| build.build_id.clone())
+                .collect()
+        } else {
+            self.build_ids_for_shots(state, changed_shots)
+        };
         mark_build_ids_stale(state, &stale_ids);
     }
 

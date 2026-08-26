@@ -25,10 +25,13 @@ use crate::ipc::{
     QueueSummary, RevisionEvent, ShotSummary, TakeSummary, WorkerCommand, WorkerError,
     WorkerPayload, WorkerReply, read_frame, write_frame,
 };
+use crate::notifications::{
+    HookConfig, HookDispatcher, MilestoneEvent, MilestoneKind, NotificationError,
+};
 use crate::paths::AppPaths;
 use crate::store::{
-    ExclusiveFileLock, ProjectStore, StoreError, append_jsonl, read_json_if_exists, read_jsonl,
-    sha256_json, write_json_atomic,
+    ExclusiveFileLock, ProjectStore, ReferenceWriteRequest, StoreError, append_jsonl,
+    read_json_if_exists, read_jsonl, sha256_json, write_json_atomic,
 };
 use crate::validation::validate_json;
 
@@ -50,12 +53,20 @@ use support::*;
 pub struct WorkerOptions {
     pub paths: AppPaths,
     pub adapter_config: Option<PathBuf>,
+    pub hook_config: Option<PathBuf>,
 }
 
 pub fn run(options: WorkerOptions) -> Result<(), WorkerRunError> {
     let _worker_lock = ExclusiveFileLock::acquire(&options.paths.worker_lock())?;
+    let hook_config = options.hook_config.or_else(|| {
+        let path = options.paths.notifications_file();
+        path.is_file().then_some(path)
+    });
     let mut runtime =
         WorkerRuntime::open_with_adapter(options.paths.clone(), options.adapter_config)?;
+    if let Some(path) = hook_config {
+        runtime.hooks = HookDispatcher::from_config(HookConfig::load(&path)?)?;
+    }
     prepare_socket(&options.paths.socket)?;
     let listener =
         UnixListener::bind(&options.paths.socket).map_err(|source| WorkerRunError::Socket {
@@ -264,6 +275,7 @@ pub struct WorkerRuntime {
     adapter_config: Option<PathBuf>,
     build_executor: BuildExecutorHandle,
     camera_cancellation: Option<ExecutorCancellation>,
+    hooks: Option<HookDispatcher>,
 }
 
 impl WorkerRuntime {
@@ -306,6 +318,7 @@ impl WorkerRuntime {
             adapter_config,
             build_executor,
             camera_cancellation: None,
+            hooks: None,
         };
         runtime.rebuild_queue_from_projects()?;
         runtime.recover_prepared_commands()?;
@@ -555,6 +568,7 @@ impl WorkerRuntime {
             );
         }
         self.commands.insert(request.command_id.clone(), committed);
+        self.emit_command_milestone(&request, &reply);
         reply
     }
 
@@ -801,6 +815,8 @@ pub enum WorkerRunError {
     BuildExecutor(#[source] std::io::Error),
     #[error("build executor channel failed: {0}")]
     BuildExecutorChannel(String),
+    #[error(transparent)]
+    Notification(#[from] NotificationError),
 }
 
 #[cfg(test)]

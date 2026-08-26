@@ -2,13 +2,43 @@
 
 SparkStage turns an externally authored, validated shot contract into a resumable local video production workflow for DGX Spark and MiniMax H3.
 
-The Rust control plane, Ratatui console, offline project portability, and non-GPU regression suite are implemented. MiniMax H3 workflow capabilities and DGX Spark performance remain unverified until hardware smoke tests and benchmark evidence are recorded.
+The Rust control plane, Ratatui console, immutable reference assets, deterministic SRT/VTT delivery, external-Agent evaluation reports, local milestone hooks, offline project portability, and non-GPU regression suite are implemented. MiniMax H3 workflow capabilities and DGX Spark performance remain unverified until hardware smoke tests and benchmark evidence are recorded.
 
 Validate an externally authored script contract:
 
 ```bash
 cargo run -- script validate skills/screenwriter/examples/valid-short-drama.json
 ```
+
+Evaluate a checked-in or externally collected ScriptBundle suite:
+
+```bash
+cargo run -- script evaluate \
+  --suite tests/fixtures/agent-script-bundles/expectations.json \
+  --output target/script-bundle-evaluation.json
+```
+
+Manage immutable character or location references through the worker. Inspect impact before accepting invalidation of dependent takes and builds:
+
+```bash
+cargo run -- refs impact --project PROJECT_ID --kind character --id CHARACTER_ID
+cargo run -- refs import --project PROJECT_ID --kind character --id CHARACTER_ID --file portrait.png
+cargo run -- refs replace --project PROJECT_ID --reference REF_ID --file portrait-v2.png --accept-impact
+cargo run -- refs verify --project PROJECT_ID
+```
+
+Every build with dialogue writes frozen `subtitles.srt` and `subtitles.vtt` files under its build directory and publishes matching delivery copies beside the draft, trailer, or final video.
+
+Configure a local milestone hook for subsequent worker starts:
+
+```bash
+cargo run -- notifications default --output notifications.json
+cargo run -- notifications validate --config notifications.json
+cargo run -- notifications apply --config notifications.json --data-dir PATH
+cargo run -- worker run --data-dir PATH
+```
+
+Enabled hooks require an absolute, executable, non-symlink regular file. SparkStage invokes it without a shell, clears the inherited environment, and sends the milestone JSON on stdin.
 
 Open the production console after starting a compatible SparkStage worker:
 
@@ -34,12 +64,12 @@ Run the external-Agent contract fixtures and the full local quality gates:
 sh scripts/evaluate-script-bundles.sh
 cargo fmt --all --check
 sh scripts/check-rust-file-size.sh
-cargo test --all-targets
+cargo test --all-targets --all-features
 cargo clippy --all-targets --all-features -- -D warnings
 cargo llvm-cov --all-targets --all-features --fail-under-lines 70
 ```
 
-The current non-GPU baseline is 221 tests and 70.07% line coverage. Critical pure logic is held to a higher 85%+ target where practical; DGX/H3 execution paths remain outside this claim until hardware evidence exists.
+The current local non-GPU baseline is 232 tests. The most recently recorded line coverage is 70.07%, with CI retaining a 70% gate; this change did not rerun coverage. Critical pure logic is held to a higher 85%+ target where practical. DGX/H3 execution paths remain outside every local claim until hardware evidence exists.
 
 - [Product document](docs/product.md)
 - [Technical design](docs/technical.md)

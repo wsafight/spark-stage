@@ -18,10 +18,15 @@ use crate::domain::{
 mod budget;
 mod builds;
 mod decisions;
+mod references;
 mod storage;
 mod support;
 
 pub use decisions::{BatchTakeSelection, DecisionRecord};
+pub use references::{
+    ReferenceImpact, ReferenceVerification, ReferenceWriteRequest, active_reference_fingerprint,
+    reference_subject_keys,
+};
 pub use storage::*;
 pub use support::validate_project_id;
 use support::*;
@@ -315,12 +320,22 @@ impl ProjectStore {
             })
             .unwrap_or_default();
         let mut changed_shots = HashSet::new();
+        let mut build_changed_shots = HashSet::new();
         let mut next_shots = BTreeMap::new();
         for shot in &bundle.shots {
-            let unchanged = previous_shots
-                .get(shot.id.as_str())
-                .is_some_and(|previous| *previous == shot);
-            let runtime = if unchanged {
+            let previous_shot = previous_shots.get(shot.id.as_str()).copied();
+            let bible_changed = previous_bundle
+                .as_ref()
+                .is_some_and(|previous| bible_change_affects_shot(previous, &bundle, shot));
+            let generation_unchanged = previous_shot
+                .is_some_and(|previous| shot_generation_equal(previous, shot))
+                && !bible_changed;
+            let build_unchanged =
+                previous_shot.is_some_and(|previous| previous == shot) && !bible_changed;
+            if !build_unchanged {
+                build_changed_shots.insert(shot.id.clone());
+            }
+            let mut runtime = if generation_unchanged {
                 state.shots.get(&shot.id).cloned().unwrap_or_else(|| {
                     initial_shot_state(
                         shot.id.clone(),
@@ -336,11 +351,14 @@ impl ProjectStore {
                     shot.generation_plan.risk,
                 )
             };
+            runtime.title.clone_from(&shot.title);
+            runtime.risk = shot.generation_plan.risk;
             next_shots.insert(shot.id.clone(), runtime);
         }
         for old_id in state.shots.keys() {
             if !next_shots.contains_key(old_id) {
                 changed_shots.insert(old_id.clone());
+                build_changed_shots.insert(old_id.clone());
             }
         }
         for take in state.takes.values_mut() {
@@ -348,7 +366,7 @@ impl ProjectStore {
                 take.stale = true;
             }
         }
-        self.mark_builds_stale_for_contract(&mut state, &changed_shots, delivery_changed);
+        self.mark_builds_stale_for_contract(&mut state, &build_changed_shots, delivery_changed);
         state.shots = next_shots;
 
         for (id, record) in &mut state.contracts {

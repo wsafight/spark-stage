@@ -10,11 +10,13 @@ use crate::media::{MediaCheckStatus, MediaReport};
 
 mod contact_sheet;
 mod executor;
+mod subtitles;
 
 pub(crate) use executor::{BuildEvent, BuildExecutorHandle, BuildRequest};
 
 pub const BUILD_RECIPE_SCHEMA_VERSION: &str = "1.0";
 pub const BUILD_REVIEW_REPORT_SCHEMA_VERSION: &str = "1.0";
+pub use subtitles::{SubtitleCue, SubtitleTrack};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -60,6 +62,8 @@ pub struct BuildRecipe {
     pub fps: u32,
     pub expected_duration_seconds: u32,
     pub inputs: Vec<BuildInput>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtitles: Option<SubtitleTrack>,
     pub output_path: PathBuf,
     pub delivery_path: PathBuf,
 }
@@ -76,6 +80,10 @@ pub struct BuildInput {
     pub workflow_hash: String,
     pub model_fingerprint: String,
     pub seed: u64,
+    #[serde(default)]
+    pub reference_subjects: Vec<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reference_fingerprint: String,
     #[serde(default)]
     pub warnings: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -184,6 +192,9 @@ pub fn plan_selected(
         expected_duration_seconds = expected_duration_seconds
             .checked_add(trim_seconds.unwrap_or(shot.duration))
             .ok_or(BuildError::DurationOverflow)?;
+        let reference_subjects = crate::store::reference_subject_keys(shot);
+        let reference_fingerprint =
+            crate::store::active_reference_fingerprint(state, &reference_subjects);
         inputs.push(BuildInput {
             shot_id: shot.id.clone(),
             take_id: take_id.clone(),
@@ -194,6 +205,8 @@ pub fn plan_selected(
             workflow_hash: take.workflow_hash.clone(),
             model_fingerprint: take.model_fingerprint.clone(),
             seed: take.seed,
+            reference_subjects,
+            reference_fingerprint,
             warnings: take.warnings.clone(),
             first_frame_path: Some(first_frame_path.clone()),
             trim_seconds,
@@ -210,6 +223,7 @@ pub fn plan_selected(
         }
         BuildKind::Final => PathBuf::from("final").join(format!("{}.mp4", state.project_id)),
     };
+    let subtitles = subtitles::plan(build_id, &state.project_id, kind, bundle, selected_shot_ids)?;
     Ok(BuildRecipe {
         schema_version: BUILD_RECIPE_SCHEMA_VERSION.to_owned(),
         build_id: build_id.to_owned(),
@@ -224,6 +238,7 @@ pub fn plan_selected(
         fps: bundle.project.delivery.fps,
         expected_duration_seconds,
         inputs,
+        subtitles,
         output_path,
         delivery_path,
     })
@@ -344,6 +359,11 @@ pub fn run(project_root: &Path, recipe: &BuildRecipe) -> Result<(), BuildError> 
         source,
     })?;
     publish_copy(&output, &delivery)?;
+    if let Some(track) = &recipe.subtitles {
+        subtitles::write(project_root, track)?;
+    } else {
+        subtitles::remove_delivery(project_root, &recipe.delivery_path)?;
+    }
     let contact_sheet_path = contact_sheet::create(project_root, recipe)?;
     let report_path = project_root
         .join("builds")
@@ -407,6 +427,15 @@ pub fn validate_current(recipe: &BuildRecipe, state: &ProjectState) -> Result<()
                 input.take_id
             )));
         }
+        if !input.reference_fingerprint.is_empty()
+            && crate::store::active_reference_fingerprint(state, &input.reference_subjects)
+                != input.reference_fingerprint
+        {
+            return Err(BuildError::Stale(format!(
+                "shot `{}` reference dependencies changed",
+                input.shot_id
+            )));
+        }
         let shot = state
             .shots
             .get(&input.shot_id)
@@ -420,6 +449,21 @@ pub fn validate_current(recipe: &BuildRecipe, state: &ProjectState) -> Result<()
                 "shot `{}` decision changed",
                 input.shot_id
             )));
+        }
+    }
+    if let Some(track) = &recipe.subtitles {
+        for path in [
+            &track.srt_path,
+            &track.vtt_path,
+            &track.delivery_srt_path,
+            &track.delivery_vtt_path,
+        ] {
+            validate_relative_path(path)?;
+        }
+        if track.cues.is_empty() || track.source_hash.is_empty() {
+            return Err(BuildError::Subtitle(
+                "subtitle track is empty or lacks source lineage".to_owned(),
+            ));
         }
     }
     Ok(())
@@ -614,6 +658,8 @@ pub enum BuildError {
     Path(PathBuf),
     #[error("invalid build recipe: {0}")]
     Recipe(String),
+    #[error("subtitle generation failed: {0}")]
+    Subtitle(String),
     #[error("cannot access `{path}`: {source}")]
     Io {
         path: PathBuf,

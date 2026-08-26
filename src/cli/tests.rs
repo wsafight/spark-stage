@@ -12,6 +12,72 @@ fn schema_write_is_atomic_and_parseable() {
 }
 
 #[test]
+fn script_evaluation_executes_and_writes_a_report() {
+    let directory = tempfile::tempdir().unwrap();
+    let output = directory.path().join("evaluation.json");
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let cli = Cli::try_parse_from([
+        "sparkstage",
+        "script",
+        "evaluate",
+        "--suite",
+        root.join("tests/fixtures/agent-script-bundles/expectations.json")
+            .to_str()
+            .unwrap(),
+        "--root",
+        root.to_str().unwrap(),
+        "--output",
+        output.to_str().unwrap(),
+    ])
+    .unwrap();
+
+    assert_eq!(execute(cli).unwrap(), ExitCode::SUCCESS);
+    let report: crate::evaluation::EvaluationReport =
+        serde_json::from_slice(&fs::read(output).unwrap()).unwrap();
+    assert!(report.passed);
+}
+
+#[test]
+fn refs_and_notification_commands_parse_without_side_effects() {
+    for arguments in [
+        vec![
+            "refs",
+            "impact",
+            "--project",
+            "demo",
+            "--kind",
+            "character",
+            "--id",
+            "zhao",
+        ],
+        vec![
+            "refs",
+            "import",
+            "--project",
+            "demo",
+            "--kind",
+            "location",
+            "--id",
+            "room",
+            "--file",
+            "room.png",
+            "--accept-impact",
+        ],
+        vec!["notifications", "default"],
+        vec![
+            "notifications",
+            "validate",
+            "--config",
+            "notifications.json",
+        ],
+    ] {
+        let mut command = vec!["sparkstage"];
+        command.extend(arguments);
+        Cli::try_parse_from(command).unwrap();
+    }
+}
+
+#[test]
 fn tui_arguments_parse_without_starting_terminal() {
     let cli = Cli::try_parse_from([
         "sparkstage",

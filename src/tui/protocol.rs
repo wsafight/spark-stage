@@ -2,8 +2,11 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::BudgetContract;
-use crate::store::{BatchTakeSelection, CleanupPlan, DecisionRecord, StorageReport};
+use crate::domain::{BudgetContract, ReferenceAsset, ReferenceSubjectKind};
+use crate::store::{
+    BatchTakeSelection, CleanupPlan, DecisionRecord, ReferenceImpact, ReferenceVerification,
+    StorageReport,
+};
 
 pub const IPC_PROTOCOL_VERSION: &str = "1.0";
 
@@ -54,6 +57,23 @@ pub enum WorkerCommand {
     DecisionHistory {
         limit: u32,
     },
+    ListReferences,
+    ReferenceImpact {
+        subject_kind: ReferenceSubjectKind,
+        subject_id: String,
+    },
+    ImportReference {
+        subject_kind: ReferenceSubjectKind,
+        subject_id: String,
+        source: PathBuf,
+        accept_impact: bool,
+    },
+    ReplaceReference {
+        reference_id: String,
+        source: PathBuf,
+        accept_impact: bool,
+    },
+    VerifyReferences,
     ApplyScript {
         bundle_json: String,
     },
@@ -119,6 +139,9 @@ impl WorkerCommand {
                 | Self::OpenLogs
                 | Self::StorageStatus
                 | Self::DecisionHistory { .. }
+                | Self::ListReferences
+                | Self::ReferenceImpact { .. }
+                | Self::VerifyReferences
         )
     }
 }
@@ -150,6 +173,9 @@ pub enum WorkerPayload {
     StorageReport(StorageReport),
     CleanupPlan(CleanupPlan),
     DecisionHistory { decisions: Vec<DecisionRecord> },
+    ReferenceList { references: Vec<ReferenceAsset> },
+    ReferenceImpact(ReferenceImpact),
+    ReferenceVerification(ReferenceVerification),
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

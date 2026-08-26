@@ -6,6 +6,7 @@ mod cancellation;
 mod diagnostics;
 mod history;
 mod projects;
+mod references;
 mod review;
 mod storage;
 
@@ -48,6 +49,23 @@ impl WorkerRuntime {
                 approve,
             } => self.review_batch(request, selections, *approve),
             WorkerCommand::DecisionHistory { limit } => self.decision_history(request, *limit),
+            WorkerCommand::ListReferences => self.list_references(request),
+            WorkerCommand::ReferenceImpact {
+                subject_kind,
+                subject_id,
+            } => self.reference_impact(request, *subject_kind, subject_id),
+            WorkerCommand::ImportReference {
+                subject_kind,
+                subject_id,
+                source,
+                accept_impact,
+            } => self.import_reference(request, *subject_kind, subject_id, source, *accept_impact),
+            WorkerCommand::ReplaceReference {
+                reference_id,
+                source,
+                accept_impact,
+            } => self.replace_reference(request, reference_id, source, *accept_impact),
+            WorkerCommand::VerifyReferences => self.verify_references(request),
             WorkerCommand::ApplyScript { bundle_json } => self.apply_script(request, bundle_json),
             WorkerCommand::ApproveScript => self.approve_script(request, None),
             WorkerCommand::Approve { approval_id } => self.approve(request, approval_id),
@@ -752,6 +770,9 @@ impl WorkerRuntime {
             } else {
                 (direct_seed, None, None)
             };
+        let reference_subjects = crate::store::reference_subject_keys(shot);
+        let reference_fingerprint =
+            crate::store::active_reference_fingerprint(&state, &reference_subjects);
         let input_hash = match sha256_json(&(
             state.active_contract_id.as_deref(),
             shot,
@@ -759,6 +780,7 @@ impl WorkerRuntime {
             seed,
             parent_take_id.as_deref(),
             promotion_strategy,
+            reference_fingerprint,
         )) {
             Ok(hash) => hash,
             Err(error) => return store_failure(request, error),

@@ -1,5 +1,3 @@
-use serde::Deserialize;
-
 use super::*;
 
 const VALID: &str = include_str!("../../skills/screenwriter/examples/valid-short-drama.json");
@@ -100,85 +98,14 @@ fn rejects_colliding_audition_and_final_profiles() {
     }));
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AgentFixtureSuite {
-    schema_version: String,
-    cases: Vec<AgentFixtureExpectation>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AgentFixtureExpectation {
-    bundle: String,
-    valid: bool,
-    project_id: Option<String>,
-    shots: Option<usize>,
-    duration_seconds: Option<u32>,
-    agent_host: Option<String>,
-    issue_codes: Vec<String>,
-}
-
 #[test]
 fn external_agent_script_bundles_match_checked_in_expectations() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let suite: AgentFixtureSuite = serde_json::from_slice(
-        &std::fs::read(root.join("tests/fixtures/agent-script-bundles/expectations.json")).unwrap(),
+    let report = crate::evaluation::evaluate_suite(
+        root,
+        &root.join("tests/fixtures/agent-script-bundles/expectations.json"),
     )
     .unwrap();
-    assert_eq!(suite.schema_version, SUPPORTED_SCHEMA_VERSION);
-    assert!(suite.cases.len() >= 3);
-
-    for expected in suite.cases {
-        let source = std::fs::read_to_string(root.join(&expected.bundle)).unwrap();
-        let result = validate_json(&source);
-        assert_eq!(
-            result.is_valid(),
-            expected.valid,
-            "{}: {:#?}",
-            expected.bundle,
-            result.issues
-        );
-        assert_eq!(
-            result
-                .issues
-                .iter()
-                .map(|issue| issue.code.to_owned())
-                .collect::<Vec<_>>(),
-            expected.issue_codes,
-            "{}",
-            expected.bundle
-        );
-        if let Some(bundle) = result.bundle {
-            assert_eq!(
-                Some(bundle.project.id),
-                expected.project_id,
-                "{}",
-                expected.bundle
-            );
-            assert_eq!(
-                Some(bundle.shots.len()),
-                expected.shots,
-                "{}",
-                expected.bundle
-            );
-            assert_eq!(
-                Some(bundle.shots.iter().map(|shot| shot.duration).sum()),
-                expected.duration_seconds,
-                "{}",
-                expected.bundle
-            );
-            assert_eq!(
-                bundle.authoring.and_then(|authoring| authoring.agent_host),
-                expected.agent_host,
-                "{}",
-                expected.bundle
-            );
-        } else {
-            assert!(expected.project_id.is_none());
-            assert!(expected.shots.is_none());
-            assert!(expected.duration_seconds.is_none());
-            assert!(expected.agent_host.is_none());
-        }
-    }
+    assert!(report.passed, "{report:#?}");
+    assert!(report.total_cases >= 3);
 }

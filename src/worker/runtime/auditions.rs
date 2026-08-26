@@ -103,6 +103,9 @@ impl WorkerRuntime {
             .active_contract_id
             .clone()
             .ok_or(StoreError::NoActiveContract)?;
+        let reference_subjects = crate::store::reference_subject_keys(shot);
+        let reference_fingerprint =
+            crate::store::active_reference_fingerprint(&state, &reference_subjects);
         let input_hash = sha256_json(&(
             contract_id.as_str(),
             shot,
@@ -110,6 +113,7 @@ impl WorkerRuntime {
             seed,
             Option::<&str>::None,
             Option::<PromotionStrategy>::None,
+            reference_fingerprint,
         ))?;
         let job = JobJournal {
             schema_version: crate::domain::PROJECT_SCHEMA_VERSION.to_owned(),

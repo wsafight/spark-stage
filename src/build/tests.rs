@@ -91,6 +91,8 @@ fn trailer_filter_trims_each_input_before_concat() {
                 workflow_hash: "workflow".to_owned(),
                 model_fingerprint: "model".to_owned(),
                 seed: 1,
+                reference_subjects: Vec::new(),
+                reference_fingerprint: String::new(),
                 warnings: Vec::new(),
                 first_frame_path: None,
                 trim_seconds: Some(2),
@@ -105,11 +107,14 @@ fn trailer_filter_trims_each_input_before_concat() {
                 workflow_hash: "workflow".to_owned(),
                 model_fingerprint: "model".to_owned(),
                 seed: 2,
+                reference_subjects: Vec::new(),
+                reference_fingerprint: String::new(),
                 warnings: Vec::new(),
                 first_frame_path: None,
                 trim_seconds: Some(2),
             },
         ],
+        subtitles: None,
         output_path: PathBuf::from("builds/BLD-test/output.mp4"),
         delivery_path: PathBuf::from("final/demo-trailer.mp4"),
     };
@@ -410,11 +415,17 @@ fn synthetic_two_clip_build_publishes_verified_artifacts() {
             workflow_hash: "synthetic-workflow".to_owned(),
             model_fingerprint: "synthetic-model".to_owned(),
             seed: u64::try_from(index).unwrap(),
+            reference_subjects: Vec::new(),
+            reference_fingerprint: String::new(),
             warnings: Vec::new(),
             first_frame_path: Some(frame.first.strip_prefix(root).unwrap().to_owned()),
             trim_seconds: None,
         });
     }
+    let bundle: ScriptBundle = serde_json::from_str(BUNDLE).unwrap();
+    let subtitles =
+        super::subtitles::plan("BLD-synthetic", "synthetic", BuildKind::Draft, &bundle, &[])
+            .unwrap();
     let recipe = BuildRecipe {
         schema_version: BUILD_RECIPE_SCHEMA_VERSION.to_owned(),
         build_id: "BLD-synthetic".to_owned(),
@@ -428,6 +439,7 @@ fn synthetic_two_clip_build_publishes_verified_artifacts() {
         fps: 12,
         expected_duration_seconds: 2,
         inputs,
+        subtitles,
         output_path: PathBuf::from("builds/BLD-synthetic/output.mp4"),
         delivery_path: PathBuf::from("review/draft-cut.mp4"),
     };
@@ -452,6 +464,10 @@ fn synthetic_two_clip_build_publishes_verified_artifacts() {
             .is_file()
     );
     assert!(root.join("review/contact-sheet.jpg").is_file());
+    assert!(root.join("builds/BLD-synthetic/subtitles.srt").is_file());
+    assert!(root.join("builds/BLD-synthetic/subtitles.vtt").is_file());
+    assert!(root.join("review/draft-cut.srt").is_file());
+    assert!(root.join("review/draft-cut.vtt").is_file());
 
     let report: BuildReviewReport =
         crate::store::read_json(&root.join("builds/BLD-synthetic/review-report.json")).unwrap();
@@ -468,6 +484,7 @@ fn synthetic_two_clip_build_publishes_verified_artifacts() {
     assert!(report.media.valid);
     assert_eq!(report.recipe.inputs[0].input_hash, "input-0");
     assert_eq!(report.recipe.inputs[1].seed, 1);
+    assert!(report.recipe.subtitles.is_some());
 }
 
 fn synthetic_build_runtime_available() -> bool {

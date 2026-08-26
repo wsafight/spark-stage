@@ -259,6 +259,29 @@ fn startup_recovers_completed_job_and_resumes_audition_batch() {
         approval.kind == ApprovalKind::CandidateSelection
             && approval.take_ids.contains(&take.take_id)
     }));
+    let resumed_job = store
+        .read_job(state.shots["S01"].active_job_id.as_deref().unwrap())
+        .unwrap();
+    let bundle = store.read_active_bundle().unwrap().unwrap();
+    let shot = bundle
+        .shots
+        .iter()
+        .find(|shot| shot.id == resumed_job.shot_id)
+        .unwrap();
+    let reference_subjects = crate::store::reference_subject_keys(shot);
+    let reference_fingerprint =
+        crate::store::active_reference_fingerprint(&state, &reference_subjects);
+    let expected_input_hash = sha256_json(&(
+        resumed_job.contract_id.as_str(),
+        shot,
+        &resumed_job.profile,
+        resumed_job.seed,
+        Option::<&str>::None,
+        Option::<PromotionStrategy>::None,
+        reference_fingerprint,
+    ))
+    .unwrap();
+    assert_eq!(resumed_job.input_hash, expected_input_hash);
     assert!(recovered.queue.running.is_none());
     assert_eq!(recovered.queue.pending.len(), 1);
 }

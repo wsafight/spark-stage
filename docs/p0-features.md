@@ -19,6 +19,10 @@
 | 9 | 崩溃一致性与审计恢复 | 已实现 | decision 两阶段 prepared/committed；prepared 不对外显示；cleanup apply/restore 可从实际文件位置续跑 |
 | 10 | 项目可移植性 | 已实现 | 项目校验、逐文件 SHA-256 TAR、verify-before-import、禁止覆盖、迁移 dry-run 和修改前备份 |
 | 11 | 自动化质量门禁 | 已实现 | Linux/macOS CI、标准 FFmpeg 合成媒体、70% 行覆盖率、aarch64 check、audit/deny 和 Agent 合同夹具 |
+| 12 | 参考素材管理与精确失效 | 已实现 | 角色/地点参考不可变导入、hash 校验、替换历史、影响预览和显式确认；只失效实际依赖的 take/build |
+| 13 | 对白字幕交付 | 已实现 | build 配方冻结对白来源、cue、SRT/VTT 路径与 hash；局部 draft 只包含选中镜头字幕 |
+| 14 | 外部 Agent 评测 | 已实现 | 可对 checked-in 或外部采集的 ScriptBundle suite 生成稳定 JSON，统计首次通过、修复和 Agent/model 指标 |
+| 15 | 本机里程碑通知 | 已实现 | 七类事件可交给无 shell、清空环境、JSON stdin 的串行命令 hook；hook 不阻塞 worker 调度 |
 
 ## 2. 命令面
 
@@ -126,6 +130,52 @@ sparkstage tui [--project PROJECT_ID]
 
 页面固定为 Projects、Dashboard、Review、Shots、Takes、Queue、Builds、Storage、History、Diagnostics。项目切换会重建 revision subscription；批量批准 warning 前必须显式接受。History 只显示 committed decision，Storage 的 apply/restore 都要求确认并复用 worker revision。
 
+### 2.10 参考素材
+
+```text
+sparkstage refs list --project PROJECT_ID
+sparkstage refs impact --project PROJECT_ID --kind character --id CHARACTER_ID
+sparkstage refs import --project PROJECT_ID --kind character --id CHARACTER_ID --file portrait.png
+sparkstage refs replace --project PROJECT_ID --reference REF_ID --file portrait-v2.png --accept-impact
+sparkstage refs verify --project PROJECT_ID
+```
+
+`character` 和 `location` subject 必须存在于 active contract。导入文件限制为非空普通 `jpg/jpeg/png/webp`，拒绝 symlink 和超过 100 MiB 的输入，落到 `refs/<kind>/<subject-id>/<reference-id>.<ext>` 并冻结 SHA-256、字节数和原始文件名。替换不会覆盖或删除旧文件，而是在状态中记录 `supersedes/superseded_by`。已有生产产物时，先用 `impact` 查看镜头、非 stale take 和 build；没有 `--accept-impact` 就拒绝变更，运行中的 camera/build 也拒绝变更。
+
+### 2.11 对白字幕
+
+含对白的 draft、trailer 和 final build 自动生成：
+
+```text
+builds/<build-id>/subtitles.srt
+builds/<build-id>/subtitles.vtt
+review/draft-cut.{srt,vtt}
+final/<project-id>[-trailer].{srt,vtt}
+```
+
+cue 按合同镜头顺序和确定性镜头时长计算；局部 draft 从零开始计时且只含选中镜头。不可变 `BuildRecipe` 固化 cue、对白 source hash、输出路径以及两个字幕文件 hash。只改 `dialogue` 会保留 raw take，但把引用相关镜头的旧 build 标为 stale；prompt、bible 或生成条件变化仍精确失效 raw take。
+
+### 2.12 外部 Agent 评测
+
+```text
+sparkstage script evaluate --suite expectations.json [--root PATH] [--output report.json] [--json]
+```
+
+suite 为每个 bundle 声明有效性、项目/镜头/时长、预期 issue code、Agent host/model、是否计入质量样本和修复次数。稳定 JSON 报告包含 expectation match、有效/无效数、首次通过率、总修复数、issue code 分布、Agent/model 汇总和逐 case 结果。仓库脚本 `scripts/evaluate-script-bundles.sh` 写入 `target/script-bundle-evaluation.json`；当前夹具结果为期望 `3/3`、质量样本 `2`、首轮有效 `2/2`、修复 `0`。该结果验证评测器和已采集样本，不冒充未来 Agent 或模型总体质量。
+
+### 2.13 本机通知与命令 hook
+
+```text
+sparkstage notifications default --output notifications.json
+sparkstage notifications validate --config notifications.json
+sparkstage notifications apply --config notifications.json [--data-dir PATH]
+sparkstage notifications show [--data-dir PATH]
+sparkstage notifications disable [--data-dir PATH]
+sparkstage worker run [--hook-config notifications.json]
+```
+
+未显式传 `--hook-config` 时，worker 若发现 `<data-dir>/notifications.json` 会自动加载。事件固定为 `approval_required`、`take_ready`、`camera_failed`、`build_completed`、`build_failed`、`disk_blocked` 和 `project_completed`。启用配置要求绝对路径的可执行普通文件且不能是 symlink；调用不经过 shell、清空父进程环境，只提供三项 `SPARKSTAGE_*` 标识并把完整事件 JSON 写到 stdin。独立串行线程按顺序执行 hook，失败只记录诊断，不改变项目状态或阻塞 IPC/GPU 调度。
+
 ## 3. DGX 验证边界
 
 以下不属于本地完成声明：MiniMax H3 的真实节点 binding、原生音轨、T2V/I2V/FLF2V/R2V、audition/final 成本比、显存、画质和完整 FFmpeg 交付。它们必须在 DGX Spark 上产生 capability report 与 benchmark run 后才能标为 verified。
@@ -139,5 +189,9 @@ sparkstage tui [--project PROJECT_ID]
 - decision prepared/committed、重复 event、原子批量和 cleanup 中断恢复必须覆盖故障注入。
 - 项目归档覆盖 payload 篡改、symlink、目标冲突、导入拒绝覆盖和迁移备份。
 - 两套独立完整 ScriptBundle 与拒绝样例使用固定 expectation 回归，不在测试里调用 LLM。
+- 评测报告覆盖 Agent/model 聚合、首次通过、修复次数、issue code 分布和不匹配退出码。
+- 参考素材覆盖不可变导入、hash 篡改、影响确认、精确 take/build 失效和替换历史。
+- 字幕覆盖 SRT/VTT 时间格式、局部 draft 范围、配方 hash、交付副本以及对白-only stale 规则。
+- hook 覆盖绝对可执行文件、symlink 拒绝、无 shell 参数传递、清空环境和 JSON stdin。
 - 标准 FFmpeg 环境执行无音轨、静音、黑帧、静帧、时长、FPS、边界帧和两镜 build；能力不足只能在夹具生成前跳过。
-- 全量 `cargo test --all-targets`、严格 Clippy、70% 行覆盖率、cargo-audit 和 cargo-deny 必须通过。当前无 GPU 基线为 221 个测试、70.07% 行覆盖率；关键纯逻辑按 85%+ 维护，不为统一追求 90% 添加无行为价值的测试。
+- 全量 `cargo test --all-targets --all-features`、严格 Clippy、70% 行覆盖率、cargo-audit 和 cargo-deny 必须通过。当前本地无 GPU 基线为 232 个测试；最近已记录的行覆盖率为 70.07%，本次变更未重跑覆盖率，仍由 CI 的 70% 门禁复核。关键纯逻辑按 85%+ 维护，不为统一追求 90% 添加无行为价值的测试。

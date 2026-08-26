@@ -155,6 +155,7 @@ $XDG_CONFIG_HOME/sparkstage/
 └── config.yaml                 # 项目根、ComfyUI 地址、播放器等
 
 $XDG_DATA_HOME/sparkstage/
+├── notifications.json          # 可选的本机里程碑 hook 配置
 ├── runtime/
 │   ├── worker.lock
 │   ├── worker.sock
@@ -179,6 +180,8 @@ $XDG_CACHE_HOME/sparkstage/
 - `state.json` 是当前项目状态快照，带单调递增的 `revision`。
 - `jobs/<job-id>.json` 是可变的逻辑 job journal，内部保存一次或多次 submission attempt。
 - `raw/<shot>/<take-id>.json` 在输出验证后冻结，生成字段不再修改。
+- `refs/<character|location>/<subject-id>/<reference-id>.<ext>` 保存不可变参考文件；`state.json.references` 冻结 SHA-256、字节数、原始文件名和替换链。
+- `builds/<build-id>/subtitles.{srt,vtt}` 是 recipe 冻结 cue 的确定性派生物；交付副本位于对应 review/final 视频旁。
 - `decisions.jsonl` 记录人工或策略审批，`events.jsonl` 记录机器事件。
 - 临时文件与目标文件必须在同一文件系统，保证 rename 原子性。
 - worker 在执行变更命令、开始 job 和回收输出前重新读取合同 hash；若外部编辑发生在生成途中，结果仍落成可追溯 take，但立即标记 stale，不能自动获批。
@@ -195,6 +198,7 @@ $XDG_CACHE_HOME/sparkstage/
 | Command ID | `01J...` | 每次变更命令唯一，客户端重试复用 |
 | Backend Job ID | ComfyUI prompt id | 后端确认接收后绑定 |
 | Build ID | `BLD-01J...` | 一次 draft / trailer / final 构建；不与 benchmark 的 B01–B06 混名 |
+| Reference ID | `REF-<command-hash>` | 一次不可变参考导入；替换生成新 ID，旧 ID 保留 |
 
 合同哈希不能直接依赖用户文件的空格和键顺序。实现先把已验证的 JSON 反序列化为强类型结构，再按稳定字段顺序输出 canonical JSON，最后做 SHA-256。参考文件和 workflow 对原始字节做流式 SHA-256。
 
@@ -253,6 +257,8 @@ schema 执行跨字段校验：
 6. 用户批准后通过单个 worker 命令原子提升为当前合同；拒绝或重新导入时保留旧草稿和原始 brief。
 
 Bundle 不能包含 ComfyUI node id、scheduler、步数或 workflow JSON。具体 pipeline 是产品配置，Agent 只为它填充语义合同。skill 可以有适配 Codex、Claude Code 或其它 Agent host 的薄入口，但它们必须指向同一 schema，不能各自发明字段。
+
+`script evaluate --suite` 在 validate 之上提供独立的评测层。suite 为每个外部采集 bundle 冻结 expected validity、结构摘要、issue code、Agent host/model、质量样本标记与 repair count；输出稳定 JSON，汇总首次通过率、修复次数、issue 分布以及逐 Agent/model 指标。评测命令不调用 LLM，也不修改项目，checked-in fixture 的通过只证明样本符合冻结期望，不能外推成模型质量结论。
 
 ### 8.3 ProjectState
 
@@ -337,7 +343,7 @@ Take 是已发生生成的不可变证据。只有输出通过路径检查、文
 
 Build 使用独立于 GPU camera queue 的单执行器，状态为 `queued -> running -> needs_review -> approved`；执行、媒体硬检查或恢复失败进入 `failed`。`queued` 表示配方与状态已经持久化但 ffmpeg 尚未取走任务，`running` 只在执行线程发出 started 事件后写入，因此 TUI 能区分等待与实际封装。
 
-每条记录保存原始 command id、recipe 路径、输出路径、警告和 stale 标记。不可变 recipe 固化合同 hash、源 revision，以及每个输入 take 的 profile、input hash、adapter / workflow / model 指纹和 seed。`edit build --kind draft --shots S04-S07,S10` 在 CLI 展开为显式 shot ID，worker 校验重复和未知 ID，再按合同顺序写入 recipe；省略 `--shots` 才表示全片。局部范围只允许 draft，final 与 trailer 必须覆盖完整合同，避免片段通过终片审批后把项目错误标为 done。Build 配方要求每个 take 已有安全的项目内首帧路径，缺失或越界时必须在启动 FFmpeg 前失败。成片通过 ffprobe 与黑帧、静帧、静音硬检查后，才发布交付副本，并生成 `builds/<build-id>/contact-sheet.jpg`、`review/contact-sheet.jpg` 和包含完整配方血缘的 `review-report.json`；随后进入人工 build review，final build 仍必须经过 `final_visual_review` 才能升为 `playable + done`。当 take 决策或合同变化使 build stale 时，对应的待审批项同时撤销，旧产物仍保留但不能获批。worker 重启会恢复 `queued` 与 `running` build；缺失、损坏或身份不匹配的 recipe 只将对应 build 标为 `failed`，不能阻止其它项目启动。
+每条记录保存原始 command id、recipe 路径、输出路径、警告和 stale 标记。不可变 recipe 固化合同 hash、源 revision，以及每个输入 take 的 profile、input hash、adapter / workflow / model 指纹、seed、引用 subject 列表和 active-reference fingerprint。recipe 还可冻结对白 source hash、完整 subtitle cue、build/delivery 的 SRT/VTT 路径与内容 hash。`edit build --kind draft --shots S04-S07,S10` 在 CLI 展开为显式 shot ID，worker 校验重复和未知 ID，再按合同顺序写入 recipe；省略 `--shots` 才表示全片。局部范围只允许 draft，final 与 trailer 必须覆盖完整合同，避免片段通过终片审批后把项目错误标为 done。Build 配方要求每个 take 已有安全的项目内首帧路径，缺失或越界时必须在启动 FFmpeg 前失败。成片通过 ffprobe 与黑帧、静帧、静音硬检查后，才发布交付副本，并生成 `builds/<build-id>/subtitles.{srt,vtt}`、`builds/<build-id>/contact-sheet.jpg`、delivery 字幕、`review/contact-sheet.jpg` 和包含完整配方血缘的 `review-report.json`；随后进入人工 build review，final build 仍必须经过 `final_visual_review` 才能升为 `playable + done`。当 take 决策、引用 fingerprint 或合同变化使 build stale 时，对应的待审批项同时撤销，旧产物仍保留但不能获批。worker 重启会恢复 `queued` 与 `running` build；缺失、损坏或身份不匹配的 recipe 只将对应 build 标为 `failed`，不能阻止其它项目启动。
 
 ## 9. 唯一写入与落盘协议
 
@@ -377,7 +383,7 @@ worker 内部采用单 actor 提交状态：HTTP、WebSocket、ffmpeg 和审片�
 
 `project verify/export/verify-archive/import/migrate` 是显式维护命令，不进入运行态 command actor。`verify` 和 `export` 持有 project lock；`import` 持有 projects 目录级锁并使用隐藏暂存容器；`migrate --apply` 持有 project lock。worker 的正常变更也使用同一 project lock，因此维护命令与运行态写入不会并发落盘。
 
-归档格式是标准 TAR，第一项固定为 `archive-manifest.json`，其余项只能是 `project/<safe-relative-path>` 普通文件。manifest 按路径排序，记录 archive schema、project schema、项目 ID、字节数和逐文件 SHA-256；`project.lock` 不归档，symlink、特殊文件、重复/额外路径、非 UTF-8 路径和目标位于源项目内部都拒绝。验证还要解析 project/state、核对 brief hash 和每个 contract bundle hash，不能只验证 TAR header。导入完整执行两遍验证并在暂存项目按真实 ID 打开成功后才 rename 发布；已存在目标永不覆盖。
+归档格式是标准 TAR，第一项固定为 `archive-manifest.json`，其余项只能是 `project/<safe-relative-path>` 普通文件。manifest 按路径排序，记录 archive schema、project schema、项目 ID、字节数和逐文件 SHA-256；`project.lock` 不归档，symlink、特殊文件、重复/额外路径、非 UTF-8 路径和目标位于源项目内部都拒绝。验证还要解析 project/state、核对 brief hash、每个 contract bundle hash 以及 state 中每个参考文件的大小/SHA-256，不能只验证 TAR header。导入完整执行两遍验证并在暂存项目按真实 ID 打开成功后才 rename 发布；已存在目标永不覆盖。
 
 迁移默认 dry-run，报告源/目标 schema、具体变更和将使用的 backup 路径。当前只支持项目与 state 分别处于 `0.9` 或 `1.0` 的恢复性升级到 `1.0`；`--apply` 在任何项目文件修改前复制原始 `project.json`、`state.json` 和 plan 到 `backups/migrations/<migration-id>/`，再分别原子替换。未知 schema 只返回不可应用计划；不推断或迁移人工审批语义。
 
@@ -586,6 +592,12 @@ approval_gates: [project_test, candidate_selection, mvp_final_visual_review]
 
 MVP 的角色对白由 H3 原生音频生成，不接独立 TTS。编剧阶段先用 dialogue budget profile 做确定性时长估算；生成后统一采样参数和响度，再由人确认台词与可懂度。补帧或变速后按原时长重新对齐音轨。FunASR、VAD、SyncNet 和更完整的声音处理按 `optimization.md` 分阶段接入，它们是核对器，不是对白生成器。
 
+### 15.4 对白字幕
+
+字幕是 build 的确定性后期投影，不烧进 raw。每个纳入 build 的镜头以裁切后时长形成时间段，同镜头多句对白等分该时间段；SRT 使用逗号毫秒，WebVTT 使用点号毫秒并以 shot ID 作 cue identifier。局部 draft 只遍历显式选择的镜头且 offset 从零开始，trailer 与视频相同地把每镜裁到最多两秒。无对白时不创建空字幕文件。
+
+规划阶段在 `BuildRecipe` 冻结 normalized speaker/text、开始/结束毫秒、对白 source hash、四个安全相对路径和 SRT/VTT 内容 hash。执行阶段重新渲染并先核对 hash，再原子写 `builds/<id>/subtitles.srt|vtt`，最后复制到 draft/trailer/final 视频旁；cue 或 recipe 被篡改时 build 失败，不发布不匹配的字幕。
+
 ## 16. 审片设计
 
 ### 16.1 MVP
@@ -602,9 +614,11 @@ ReviewRun 只追加，不覆盖旧结果。改变 checker 版本或阈值会产�
 
 ## 17. Stale 与依赖
 
-stale 的业务传播规则以 `product.md` 的表格为唯一规范，本节只定义实现来源。MVP 不存一份可漂移的手工依赖图：worker 从 `bible/index.json`、`ShotContract.characters[]`、`ShotContract.location`、conditioning 引用、build recipe 和各自 hash 重建依赖。角色无台词也不会漏掉，地点依赖也不从 prompt 猜测。
+stale 的业务传播规则以 `product.md` 的表格为唯一规范，本节只定义实现来源。MVP 不存一份可漂移的手工依赖图：worker 从 `bible/index.json`、`ShotContract.characters[]`、`ShotContract.location`、conditioning 引用、active reference、build recipe 和各自 hash 重建依赖。角色无台词也不会漏掉，地点依赖也不从 prompt 猜测。
 
-stale 计算必须支持 dry-run，先列出影响对象再提交。旧文件不删除，批准记录不迁移到新 take；实现测试直接以产品表中的每一行作为验收用例，避免维护第二份规则文字。
+`refs impact` 是参考变更的 dry-run：按 subject ID 枚举合同中依赖镜头、其中仍有效的 take，以及 recipe 输入命中这些镜头的非 stale build。真正导入/替换要求相同 revision 下重新计算，并在存在生产产物时要求 `--accept-impact`；任何受影响 camera job 或任意 queued/running build 存在时拒绝变更。新参考进入 active fingerprint 和后续 generation input hash；旧参考文件及其替换链永久保留。只把依赖镜头的有效 take/build 标 stale，不重复处理已经 stale 的产物。
+
+合同替换分别计算 generation dependency 和 post-production dependency。prompt、规格、operation、camera、conditioning、continuity、generation plan 或所引用 bible 变化会失效 raw take；`dialogue` 或其它仅影响 build 的镜头字段只失效包含该镜头的 build，因此修改字幕文本不要求重拍。旧文件不删除，批准记录不迁移到新 take；实现测试直接覆盖这些分支。
 
 ## 18. Ratatui TUI
 
@@ -674,6 +688,7 @@ MVP 不依赖 Kitty / Sixel 等终端图片协议。`preview` 向 worker 请求�
 - 密钥不写项目、JSONL、命令行参数或日志；只从受控配置源读取。
 - 所有项目相对路径 canonicalize 后必须仍在项目根内。
 - 外部命令使用固定可执行文件和参数数组，用户文本不能进入 shell。
+- 通知 hook 只接受绝对路径、可执行、非 symlink 的普通文件；启动前清空继承环境，不解析 shell，只以固定 argv、三个最小标识环境变量和 stdin JSON 传递事件。
 - 下载设置大小上限、超时和允许的媒体类型。
 - 日志对 prompt、人物素材路径和远端响应做最小化记录，不打印完整环境变量。
 
@@ -689,6 +704,8 @@ MVP 不依赖 Kitty / Sixel 等终端图片协议。`preview` 向 worker 请求�
 
 普通日志供诊断，`events.jsonl` 供产品界面，benchmark 产物遵循 `optimization.md`。不能从日志反向构造人工审批。
 
+可选 `HookDispatcher` 只消费七类已提交的产品里程碑：`approval_required`、`take_ready`、`camera_failed`、`build_completed`、`build_failed`、`disk_blocked`、`project_completed`。worker 自动读取 data home 下的 `notifications.json`，也允许 `worker run --hook-config` 显式覆盖。事件在项目/队列状态提交后送入独立 channel，由单线程串行启动 hook；hook 慢、退出失败或 receiver 关闭只输出诊断，不回滚状态、不占用 worker actor 或 GPU executor。
+
 ## 22. 测试策略
 
 ### 22.1 不需要 GPU 的测试
@@ -699,9 +716,12 @@ MVP 不依赖 Kitty / Sixel 等终端图片协议。`preview` 向 worker 请求�
 - 原子写入中断、损坏 JSON 和未知 schema
 - 队列公平性、暂停、取消和预算上限
 - stale 传播与 build recipe
+- 不可变参考导入/替换、SHA-256 篡改、影响确认、精确 take/build 失效和引用 fingerprint
+- SRT/VTT cue 时间、局部 draft 范围、recipe/content hash、交付副本和 dialogue-only build stale
 - bible index、silent character、location 与 dialogue cross-field 校验
 - ScriptBundle 的合法输入、非法 JSON、越权字段、JSON Pointer 错误和原子提升
-- 不同外部 Agent 产生的 fixture 通过同一 contract suite
+- 不同外部 Agent 产生的 fixture 通过同一 contract suite，并生成首次通过率、repair、issue code 与 Agent/model 聚合报告
+- 本机 hook 配置、绝对可执行文件、symlink 拒绝、无 shell 参数、清空环境和 JSON stdin
 - ComfyUI mock 的成功、失败、断线、history 延迟和非法输出路径
 - mock adapter 在不改 `shots.json` 的前提下通过同一 contract suite；第二个真实 adapter 留到 v2 验证
 - 合成媒体 fixture 的必选/可选音轨、静音、错时长、FPS、黑帧、静帧、首尾/接力帧，以及两段真实 FFmpeg build、交付副本、联系表和血缘报告；运行时预检失败时才允许跳过，开始生成夹具后不吞错误
@@ -710,7 +730,7 @@ MVP 不依赖 Kitty / Sixel 等终端图片协议。`preview` 向 worker 请求�
 - Ratatui TestBackend 的宽 / 窄布局与关键状态快照
 - panic 和退出后的终端恢复单元边界
 
-GitHub Actions 在 Linux/macOS 上执行 fmt、严格 Clippy 和 all-target tests；Linux 安装标准 FFmpeg，使合成媒体测试走完整路径。CI 还要求每个 Rust 文件少于 900 行，超过阈值时应按职责拆分模块，而不是压缩格式。另有 Linux aarch64 cross-check、`cargo llvm-cov --fail-under-lines 70`、`cargo audit --deny warnings` 和 `cargo deny check`。当前无 GPU 基线为 221 个测试、70.07% 行覆盖率；关键纯逻辑目标为 85%+。全局覆盖率先稳定在 70%–75%，不为统一达到 90% 测试终端 raw mode、平台外壳或未接入的 DGX/H3 路径。本地随应用附带的裁剪版 FFmpeg 若缺 lavfi 源会在 fixture preflight 阶段跳过，因此本地“测试通过”不能代替 CI 的标准 FFmpeg 结果。
+GitHub Actions 在 Linux/macOS 上执行 fmt、严格 Clippy 和 all-target tests；Linux 安装标准 FFmpeg，使合成媒体测试走完整路径。CI 还要求每个 Rust 文件少于 900 行，超过阈值时应按职责拆分模块，而不是压缩格式。另有 Linux aarch64 cross-check、`cargo llvm-cov --fail-under-lines 70`、`cargo audit --deny warnings` 和 `cargo deny check`。当前本地无 GPU 基线为 232 个测试；最近已记录的行覆盖率为 70.07%，本次变更未重跑覆盖率，仍由 CI 的 70% 门禁复核。关键纯逻辑目标为 85%+。全局覆盖率先稳定在 70%–75%，不为统一达到 90% 测试终端 raw mode、平台外壳或未接入的 DGX/H3 路径。本地随应用附带的裁剪版 FFmpeg 若缺 lavfi 源会在 fixture preflight 阶段跳过，因此本地“测试通过”不能代替 CI 的标准 FFmpeg 结果。
 
 ### 22.2 DGX Spark 集成测试
 
@@ -759,7 +779,8 @@ GitHub Actions 在 Linux/macOS 上执行 fmt、严格 Clippy 和 all-target test
 
 - audition、select、promote、direct render、retry、approve
 - ffprobe 硬检查、take 血缘、首尾帧和报告
-- draft cut、trailer 和 final build
+- draft cut、trailer 和 final build，以及确定性 SRT/VTT 交付
+- 角色/地点参考的不可变导入、替换历史、hash 校验和精确 stale 传播
 
 ### Phase 4：Ratatui（已完成）
 
@@ -776,7 +797,7 @@ GitHub Actions 在 Linux/macOS 上执行 fmt、严格 Clippy 和 all-target test
 
 ### 23.1 当前实现边界
 
-截至 2026-08-26，本地代码与无 GPU 测试已覆盖项目存储、worker IPC、文案合同批准、队列暂停/恢复/取消、候选与 take 决策、自动 audition 批次、build 执行与恢复、stale 传播、人工终片 gate、预算估算/审批/磁盘硬线、两阶段 decision 恢复、可恢复清理、Ratatui 10 页控制面、项目 TAR 归档/无覆盖导入和 `0.9 -> 1.0` 迁移备份。两个独立完整 ScriptBundle fixture 与一个拒绝样例通过固定 contract suite；ComfyUI mock 已验证 `/prompt` request identity、`/history` 成功与执行失败、WebSocket 断线后的 history 收口、非法输出路径拒绝和全局 interrupt 协议。这里的“已覆盖”表示控制逻辑、状态转换和错误路径可测试，不表示 MiniMax H3 workflow、DGX Spark 性能或外部模型文案质量已经验证。
+截至 2026-08-26，本地代码与无 GPU 测试已覆盖项目存储、worker IPC、文案合同批准、队列暂停/恢复/取消、候选与 take 决策、自动 audition 批次、build 执行与恢复、参考素材管理与精确 stale 传播、SRT/VTT 字幕、人工终片 gate、预算估算/审批/磁盘硬线、两阶段 decision 恢复、可恢复清理、七类本机里程碑 hook、Ratatui 10 页控制面、项目 TAR 归档/无覆盖导入和 `0.9 -> 1.0` 迁移备份。两个独立完整 ScriptBundle fixture 与一个拒绝样例通过固定 contract suite 和稳定评测报告；ComfyUI mock 已验证 `/prompt` request identity、`/history` 成功与执行失败、WebSocket 断线后的 history 收口、非法输出路径拒绝和全局 interrupt 协议。这里的“已覆盖”表示控制逻辑、状态转换和错误路径可测试，不表示 MiniMax H3 workflow、DGX Spark 性能或外部模型文案质量已经验证。
 
 仍需在 DGX Spark 完成：导出并绑定真实 H3 API workflow，确认 prompt、seed、输出、模型指纹和原生音轨，实测 T2V 与任何 I2V / FLF2V / R2V 能力，用真实 H3 素材验证完整 FFmpeg build 与联系表产物，以及记录 audition/final 的冷启动、稳态耗时、显存和质量基线。在这些结果落盘前，相关 capability 必须保持未验证或禁用，预算 source 保持 `unmeasured_default_v1`。
 

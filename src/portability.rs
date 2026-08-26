@@ -168,6 +168,7 @@ fn verify_project_locked(store: &ProjectStore) -> Result<ProjectVerification, Po
             )));
         }
     }
+    store.verify_references()?;
     let files = collect_files(store.root())?;
     let bytes = files.iter().try_fold(0_u64, |total, file| {
         total

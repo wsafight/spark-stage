@@ -18,8 +18,10 @@ mod budget;
 mod control;
 mod edit;
 mod history;
+mod notifications;
 mod output;
 mod project;
+mod references;
 mod shots;
 mod storage;
 
@@ -32,8 +34,10 @@ use control::{
 };
 use edit::execute_edit;
 use history::{HistoryArgs, execute_history};
+use notifications::{NotificationsArgs, execute_notifications};
 use output::{print_reply, reply_exit_code};
 use project::{ProjectArgs, execute_project};
+use references::{ReferencesArgs, execute_references};
 use shots::execute_shots;
 use storage::{StorageArgs, execute_storage};
 
@@ -84,6 +88,10 @@ enum Command {
     History(HistoryArgs),
     /// Inspect or replace the persisted project budget contract.
     Budget(BudgetArgs),
+    /// Configure local milestone notifications and command hooks.
+    Notifications(NotificationsArgs),
+    /// Manage immutable character and location reference assets.
+    Refs(ReferencesArgs),
     /// Prepare and inspect immutable MiniMax H3 benchmark records.
     Benchmark(BenchmarkArgs),
     /// Generate a disabled adapter config from explicit workflow bindings.
@@ -133,6 +141,9 @@ enum WorkerSubcommand {
         /// Camera adapter config used for generation commands.
         #[arg(long, value_name = "PATH")]
         adapter_config: Option<PathBuf>,
+        /// Notification hook config; defaults to DATA_DIR/notifications.json when present.
+        #[arg(long, value_name = "PATH")]
+        hook_config: Option<PathBuf>,
     },
     /// Check whether the worker is accepting commands.
     Status {
@@ -334,6 +345,20 @@ enum ScriptCommand {
         #[arg(long, value_name = "PATH")]
         output: Option<PathBuf>,
     },
+    /// Evaluate a checked-in or externally collected bundle suite.
+    Evaluate {
+        #[arg(long, value_name = "PATH")]
+        suite: PathBuf,
+        /// Root used by bundle paths in the suite; defaults to the current directory.
+        #[arg(long, value_name = "PATH")]
+        root: Option<PathBuf>,
+        /// Write the complete JSON report atomically.
+        #[arg(long, value_name = "PATH")]
+        output: Option<PathBuf>,
+        /// Print the complete machine-readable report.
+        #[arg(long)]
+        json: bool,
+    },
     /// Import a valid ScriptBundle through the worker and request approval.
     Apply {
         #[arg(value_name = "BUNDLE")]
@@ -395,6 +420,10 @@ enum CliError {
     Adapter(#[from] crate::adapter::AdapterError),
     #[error(transparent)]
     Portability(#[from] crate::portability::PortabilityError),
+    #[error(transparent)]
+    Evaluation(#[from] crate::evaluation::EvaluationError),
+    #[error(transparent)]
+    Notification(#[from] crate::notifications::NotificationError),
     #[error("cannot initialize async runtime: {0}")]
     Runtime(#[from] io::Error),
     #[error("{0}")]
@@ -419,6 +448,12 @@ fn execute(cli: Cli) -> Result<ExitCode, CliError> {
         Command::Script(args) => match args.command {
             ScriptCommand::Validate { bundle, json } => validate_file(&bundle, json),
             ScriptCommand::Schema { output } => write_schema(output.as_deref()),
+            ScriptCommand::Evaluate {
+                suite,
+                root,
+                output,
+                json,
+            } => evaluate_scripts(&suite, root.as_deref(), output.as_deref(), json),
             ScriptCommand::Apply {
                 bundle,
                 project,
@@ -440,6 +475,8 @@ fn execute(cli: Cli) -> Result<ExitCode, CliError> {
         Command::Storage(args) => execute_storage(args),
         Command::History(args) => execute_history(args),
         Command::Budget(args) => execute_budget(args),
+        Command::Notifications(args) => execute_notifications(args),
+        Command::Refs(args) => execute_references(args),
         Command::Benchmark(args) => execute_benchmark(args),
         Command::Adapter(args) => execute_adapter(args),
         Command::Tui(args) => {
@@ -458,6 +495,7 @@ fn execute_worker(args: WorkerArgs) -> Result<ExitCode, CliError> {
         WorkerSubcommand::Run {
             connection,
             adapter_config,
+            hook_config,
         } => {
             let paths = resolved_paths(&connection);
             println!("Starting SparkStage worker at {}", paths.socket.display());
@@ -469,6 +507,7 @@ fn execute_worker(args: WorkerArgs) -> Result<ExitCode, CliError> {
                         let default = PathBuf::from("adapters/minimax-h3-comfy.yaml");
                         default.exists().then_some(default)
                     }),
+                hook_config,
             })?;
             Ok(ExitCode::SUCCESS)
         }
@@ -685,6 +724,45 @@ fn write_schema(output: Option<&Path>) -> Result<ExitCode, CliError> {
     }
 
     Ok(ExitCode::SUCCESS)
+}
+
+fn evaluate_scripts(
+    suite: &Path,
+    root: Option<&Path>,
+    output: Option<&Path>,
+    machine_readable: bool,
+) -> Result<ExitCode, CliError> {
+    let resolved_root = root.map(Path::to_owned).unwrap_or(std::env::current_dir()?);
+    let report = crate::evaluation::evaluate_suite(&resolved_root, suite)?;
+    let mut encoded = serde_json::to_string_pretty(&report)?;
+    encoded.push('\n');
+    if let Some(path) = output {
+        write_atomic(path, encoded.as_bytes())?;
+    }
+    if machine_readable {
+        print!("{encoded}");
+    } else {
+        println!(
+            "SCRIPT_EVALUATION {}: expectations={}/{}, valid={}/{}, first_pass={}/{} ({:.1}%), repairs={}",
+            if report.passed { "PASSED" } else { "FAILED" },
+            report.expectation_matches,
+            report.total_cases,
+            report.valid_bundles,
+            report.total_cases,
+            report.first_pass_valid,
+            report.first_pass_samples,
+            report.first_pass_valid_rate * 100.0,
+            report.total_repairs
+        );
+        if let Some(path) = output {
+            println!("report: {}", path.display());
+        }
+    }
+    Ok(if report.passed {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(EXIT_INVALID)
+    })
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), CliError> {

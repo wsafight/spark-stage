@@ -42,6 +42,11 @@ impl AppPaths {
     pub fn command_journal(&self) -> PathBuf {
         self.runtime_dir.join("commands.jsonl")
     }
+
+    #[must_use]
+    pub fn notifications_file(&self) -> PathBuf {
+        self.data_home.join("notifications.json")
+    }
 }
 
 #[must_use]
