@@ -178,7 +178,7 @@ sparkstage worker run [--hook-config notifications.json]
 
 ## 3. DGX 验证边界
 
-以下不属于本地完成声明：MiniMax H3 的真实节点 binding、原生音轨、T2V/I2V/FLF2V/R2V、audition/final 成本比、显存、画质和完整 FFmpeg 交付。它们必须在 DGX Spark 上产生 capability report 与 benchmark run 后才能标为 verified。
+以下不属于无 GPU 测试完成声明：MiniMax H3 的真实节点 binding、原生音轨、T2V/I2V/FLF2V/R2V、audition/final 成本比、显存、画质和完整 FFmpeg 交付。2026-08-29 的 DGX Spark smoke take 已独立验证当前 workflow 的 T2V 节点绑定、原生音轨、媒体硬检查和血缘；I2V、FLF2V、R2V、性能 profile、完整 build 和画质基线仍需各自产生 capability report 或 benchmark 证据后才能标为 verified。
 
 ## 4. 测试要求
 
@@ -194,4 +194,4 @@ sparkstage worker run [--hook-config notifications.json]
 - 字幕覆盖 SRT/VTT 时间格式、局部 draft 范围、配方 hash、交付副本以及对白-only stale 规则。
 - hook 覆盖绝对可执行文件、symlink 拒绝、无 shell 参数传递、清空环境和 JSON stdin。
 - 标准 FFmpeg 环境执行无音轨、静音、黑帧、静帧、时长、FPS、边界帧和两镜 build；能力不足只能在夹具生成前跳过。
-- 全量 `cargo test --all-targets --all-features`、严格 Clippy、70% 行覆盖率、cargo-audit 和 cargo-deny 必须通过。当前本地无 GPU 基线为 232 个测试；最近已记录的行覆盖率为 70.07%，本次变更未重跑覆盖率，仍由 CI 的 70% 门禁复核。关键纯逻辑按 85%+ 维护，不为统一追求 90% 添加无行为价值的测试。
+- 全量 `cargo test --all-targets --all-features`、严格 Clippy、70% 行覆盖率、cargo-audit 和 cargo-deny 必须通过。当前本地无 GPU 基线为 243 个测试（240 个单元测试和 3 个 CLI 集成测试）；最近已记录的行覆盖率为 70.07%，本次变更未重跑覆盖率，仍由 CI 的 70% 门禁复核。关键纯逻辑按 85%+ 维护，不为统一追求 90% 添加无行为价值的测试。

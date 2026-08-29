@@ -85,6 +85,7 @@ pub struct CapabilityReport {
 #[serde(deny_unknown_fields)]
 pub struct GenerationRequest {
     pub request_id: String,
+    pub project_root: PathBuf,
     pub operation: Operation,
     pub prompt: String,
     pub seed: u64,
@@ -97,6 +98,8 @@ pub struct GenerationRequest {
     pub first_frame: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_frame: Option<String>,
+    #[serde(default)]
+    pub reference_images: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference_video: Option<String>,
 }

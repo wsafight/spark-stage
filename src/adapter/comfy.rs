@@ -5,7 +5,7 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use tokio::io::AsyncWriteExt;
 use tokio_tungstenite::connect_async;
 use ulid::Ulid;
@@ -16,6 +16,7 @@ use super::{
     PreparedJob,
 };
 use crate::domain::Operation;
+use crate::media::MediaCheckPolicy;
 use crate::store::sha256_json;
 
 mod protocol;
@@ -24,6 +25,13 @@ use protocol::*;
 
 const ADAPTER_SCHEMA_VERSION: &str = "1.0";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[derive(Debug, Deserialize)]
+struct UploadReply {
+    name: String,
+    #[serde(default)]
+    subfolder: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -39,6 +47,8 @@ pub struct ComfyAdapterConfig {
     pub allow_global_interrupt: bool,
     pub workflow: PathBuf,
     pub output_node: String,
+    #[serde(default)]
+    pub duration_binding_unit: DurationBindingUnit,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_fingerprint: Option<String>,
     pub bindings: BTreeMap<String, WorkflowBinding>,
@@ -47,7 +57,17 @@ pub struct ComfyAdapterConfig {
     #[serde(default)]
     pub profiles: BTreeMap<String, BTreeMap<String, Value>>,
     #[serde(default)]
+    pub media_check_profiles: BTreeMap<String, MediaCheckPolicy>,
+    #[serde(default)]
     pub verified_operations: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DurationBindingUnit {
+    #[default]
+    Seconds,
+    Frames,
 }
 
 fn default_enabled() -> bool {
@@ -118,7 +138,25 @@ impl ComfyAdapterConfig {
                 "remote ComfyUI endpoints require allow_remote: true".to_owned(),
             ));
         }
+        for (profile, policy) in &self.media_check_profiles {
+            if !self.profiles.contains_key(profile) {
+                return Err(AdapterError::Config(format!(
+                    "media check profile `{profile}` has no matching generation profile"
+                )));
+            }
+            policy.validate().map_err(|error| {
+                AdapterError::Config(format!("media check profile `{profile}`: {error}"))
+            })?;
+        }
         Ok(())
+    }
+
+    #[must_use]
+    pub fn media_check_policy(&self, profile: &str) -> MediaCheckPolicy {
+        self.media_check_profiles
+            .get(profile)
+            .copied()
+            .unwrap_or_default()
     }
 }
 
@@ -357,6 +395,156 @@ impl ComfyAdapter {
         }
         Ok(())
     }
+
+    async fn upload_project_file(
+        &self,
+        project_root: &Path,
+        relative_path: &str,
+    ) -> Result<String, AdapterError> {
+        let root = tokio::fs::canonicalize(project_root)
+            .await
+            .map_err(|source| AdapterError::Io {
+                path: project_root.to_owned(),
+                source,
+            })?;
+        let relative = Path::new(relative_path);
+        if relative.is_absolute()
+            || relative
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err(AdapterError::UnsafeOutput(format!(
+                "project input `{relative_path}` is not a safe relative path"
+            )));
+        }
+        let candidate = root.join(relative);
+        let metadata = tokio::fs::symlink_metadata(&candidate)
+            .await
+            .map_err(|source| AdapterError::Io {
+                path: candidate.clone(),
+                source,
+            })?;
+        if !metadata.file_type().is_file() {
+            return Err(AdapterError::UnsafeOutput(format!(
+                "project input `{relative_path}` is not a regular file"
+            )));
+        }
+        let canonical = tokio::fs::canonicalize(&candidate)
+            .await
+            .map_err(|source| AdapterError::Io {
+                path: candidate.clone(),
+                source,
+            })?;
+        if !canonical.starts_with(&root) {
+            return Err(AdapterError::UnsafeOutput(format!(
+                "project input `{relative_path}` escapes the project"
+            )));
+        }
+        let filename = canonical
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| {
+                AdapterError::UnsafeOutput("project input has no safe filename".to_owned())
+            })?;
+        validate_file_component(filename)?;
+        let part = reqwest::multipart::Part::file(&canonical)
+            .await
+            .map_err(|source| AdapterError::Io {
+                path: canonical.clone(),
+                source,
+            })?
+            .file_name(filename.to_owned());
+        let response = self
+            .client
+            .post(self.endpoint_url("upload/image")?)
+            .multipart(
+                reqwest::multipart::Form::new()
+                    .text("overwrite", "false")
+                    .part("image", part),
+            )
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<UploadReply>()
+            .await?;
+        validate_file_component(&response.name)?;
+        if !response.subfolder.trim().is_empty() {
+            validate_relative_path(Path::new(&response.subfolder))?;
+        }
+        let remote = if response.subfolder.trim().is_empty() {
+            response.name
+        } else {
+            format!("{}/{}", response.subfolder, response.name)
+        };
+        validate_relative_path(Path::new(&remote))?;
+        Ok(remote)
+    }
+
+    async fn set_reference_images(
+        &self,
+        workflow: &mut Value,
+        request: &GenerationRequest,
+    ) -> Result<(), AdapterError> {
+        const MAX_H3_REFERENCE_IMAGES: usize = 9;
+        if request.reference_images.len() > MAX_H3_REFERENCE_IMAGES {
+            return Err(AdapterError::Binding(format!(
+                "H3 supports at most {MAX_H3_REFERENCE_IMAGES} reference images"
+            )));
+        }
+        let binding = self.binding("reference_images").ok_or_else(|| {
+            AdapterError::Binding("reference_images requires a workflow binding".to_owned())
+        })?;
+        let mut references = Map::new();
+        let mut next_id = next_numeric_node_id(workflow);
+        for (index, path) in request.reference_images.iter().enumerate() {
+            let uploaded = self
+                .upload_project_file(&request.project_root, path)
+                .await?;
+            let node_id = next_id.to_string();
+            next_id = next_id.saturating_add(1);
+            workflow[node_id.clone()] = json!({
+                "class_type": "LoadImage",
+                "inputs": {"image": uploaded}
+            });
+            references.insert(format!("ref_image_{index}"), json!([node_id, 0]));
+        }
+        set_dynamic_binding(workflow, "reference_images", binding, references)
+    }
+
+    async fn set_reference_video(
+        &self,
+        workflow: &mut Value,
+        request: &GenerationRequest,
+        relative_path: &str,
+    ) -> Result<(), AdapterError> {
+        let binding = self.binding("reference_video").ok_or_else(|| {
+            AdapterError::Binding("reference_video requires a workflow binding".to_owned())
+        })?;
+        if binding.input != "ref_videos" {
+            return Err(AdapterError::Binding(
+                "H3 reference_video must bind to the ref_videos autogrow input".to_owned(),
+            ));
+        }
+        let uploaded = self
+            .upload_project_file(&request.project_root, relative_path)
+            .await?;
+        let load_video_id = next_numeric_node_id(workflow);
+        workflow[load_video_id.to_string()] = json!({
+            "class_type": "LoadVideo",
+            "inputs": {"file": uploaded}
+        });
+        let components_id = load_video_id.saturating_add(1);
+        workflow[components_id.to_string()] = json!({
+            "class_type": "GetVideoComponents",
+            "inputs": {"video": [load_video_id.to_string(), 0]}
+        });
+        let mut references = Map::new();
+        references.insert(
+            "ref_video_0".to_owned(),
+            json!([components_id.to_string(), 0]),
+        );
+        set_dynamic_binding(workflow, "reference_video", binding, references)
+    }
 }
 
 impl CameraAdapter for ComfyAdapter {
@@ -445,7 +633,11 @@ impl CameraAdapter for ComfyAdapter {
             return Err(AdapterError::Binding(errors.join("; ")));
         }
         let output_prefix = format!("sparkstage/{}", request.request_id);
-        self.set_if_bound(&mut workflow, "prompt", Value::String(request.prompt))?;
+        self.set_if_bound(
+            &mut workflow,
+            "prompt",
+            Value::String(request.prompt.clone()),
+        )?;
         self.set_if_bound(&mut workflow, "seed", Value::from(request.seed))?;
         self.set_if_bound(
             &mut workflow,
@@ -455,18 +647,24 @@ impl CameraAdapter for ComfyAdapter {
         self.set_if_bound(&mut workflow, "width", Value::from(request.width))?;
         self.set_if_bound(&mut workflow, "height", Value::from(request.height))?;
         self.set_if_bound(&mut workflow, "fps", Value::from(request.fps))?;
-        self.set_if_bound(
-            &mut workflow,
-            "duration_seconds",
-            Value::from(request.duration_seconds),
-        )?;
+        let duration = match self.config.duration_binding_unit {
+            DurationBindingUnit::Seconds => request.duration_seconds,
+            DurationBindingUnit::Frames => h3_frame_count(request.duration_seconds, request.fps),
+        };
+        self.set_if_bound(&mut workflow, "duration_seconds", Value::from(duration))?;
+        if !request.reference_images.is_empty() {
+            self.set_reference_images(&mut workflow, &request).await?;
+        }
         match request.operation {
             Operation::T2v => {}
             Operation::I2v => {
                 let first = request
                     .first_frame
                     .ok_or_else(|| AdapterError::Binding("i2v requires first_frame".to_owned()))?;
-                require_binding_set(self, &mut workflow, "first_frame", Value::String(first))?;
+                let uploaded = self
+                    .upload_project_file(&request.project_root, &first)
+                    .await?;
+                require_binding_set(self, &mut workflow, "first_frame", Value::String(uploaded))?;
             }
             Operation::Flf2v => {
                 let first = request.first_frame.ok_or_else(|| {
@@ -475,14 +673,24 @@ impl CameraAdapter for ComfyAdapter {
                 let last = request
                     .last_frame
                     .ok_or_else(|| AdapterError::Binding("flf2v requires last_frame".to_owned()))?;
+                let first = self
+                    .upload_project_file(&request.project_root, &first)
+                    .await?;
+                let last = self
+                    .upload_project_file(&request.project_root, &last)
+                    .await?;
                 require_binding_set(self, &mut workflow, "first_frame", Value::String(first))?;
                 require_binding_set(self, &mut workflow, "last_frame", Value::String(last))?;
             }
             Operation::R2v => {
-                let video = request.reference_video.ok_or_else(|| {
-                    AdapterError::Binding("r2v requires reference_video".to_owned())
-                })?;
-                require_binding_set(self, &mut workflow, "reference_video", Value::String(video))?;
+                if let Some(video) = request.reference_video.clone() {
+                    self.set_reference_video(&mut workflow, &request, &video)
+                        .await?;
+                } else if request.reference_images.is_empty() {
+                    return Err(AdapterError::Binding(
+                        "r2v requires reference_images or reference_video".to_owned(),
+                    ));
+                }
             }
         }
         self.apply_profile(&mut workflow, &request.profile)?;
@@ -597,6 +805,26 @@ fn require_binding_set(
     }
 }
 
+fn next_numeric_node_id(workflow: &Value) -> u64 {
+    workflow
+        .as_object()
+        .into_iter()
+        .flat_map(|nodes| nodes.keys())
+        .filter_map(|key| key.parse::<u64>().ok())
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1)
+}
+
+fn h3_frame_count(duration_seconds: u32, fps: u32) -> u32 {
+    let estimated = u64::from(duration_seconds)
+        .saturating_mul(u64::from(fps))
+        .max(5);
+    let remainder = estimated % 17;
+    let aligned = estimated.saturating_add((5 - remainder) % 17);
+    aligned.min(u64::from(u32::MAX)) as u32
+}
+
 fn set_binding(
     workflow: &mut Value,
     name: &str,
@@ -622,6 +850,48 @@ fn set_binding(
         )));
     }
     inputs.insert(binding.input.clone(), value);
+    Ok(())
+}
+
+fn set_dynamic_binding(
+    workflow: &mut Value,
+    name: &str,
+    binding: &WorkflowBinding,
+    values: Map<String, Value>,
+) -> Result<(), AdapterError> {
+    let node = workflow.get_mut(&binding.node).ok_or_else(|| {
+        AdapterError::Binding(format!(
+            "binding `{name}` refers to missing node `{}`",
+            binding.node
+        ))
+    })?;
+    let inputs = node
+        .get_mut("inputs")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| {
+            AdapterError::Binding(format!("node `{}` has no inputs object", binding.node))
+        })?;
+    if !inputs.contains_key(&binding.input) {
+        return Err(AdapterError::Binding(format!(
+            "binding `{name}` refers to missing dynamic input `{}.{}`",
+            binding.node, binding.input
+        )));
+    }
+    // ComfyUI V3 autogrow inputs are submitted as dot paths, then rebuilt into
+    // the nested `{ref_image_N: ...}` map immediately before node execution.
+    inputs.remove(&binding.input);
+    for (slot, value) in values {
+        if slot.is_empty()
+            || slot
+                .bytes()
+                .any(|byte| !(byte.is_ascii_alphanumeric() || byte == b'_'))
+        {
+            return Err(AdapterError::Binding(format!(
+                "binding `{name}` produced an unsafe dynamic slot `{slot}`"
+            )));
+        }
+        inputs.insert(format!("{}.{}", binding.input, slot), value);
+    }
     Ok(())
 }
 

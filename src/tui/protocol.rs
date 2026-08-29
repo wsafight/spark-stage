@@ -87,6 +87,11 @@ pub enum WorkerCommand {
     AuditionShot {
         shot_id: String,
     },
+    SmokeTestShot {
+        shot_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seed: Option<u64>,
+    },
     RenderShot {
         shot_id: String,
     },

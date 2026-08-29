@@ -63,6 +63,67 @@ fn workflow_validation_reports_output_node_and_binding_errors() {
 }
 
 #[test]
+fn workflow_validation_checks_installed_input_contracts() {
+    let config = config(PathBuf::from("workflow.json"));
+    let object_info = json!({
+        "TextNode": {"input": {"required": {"other": ["STRING", {}]}}},
+        "SeedNode": {},
+        "SizeNode": {},
+        "VideoOutput": {}
+    });
+
+    let (errors, missing_nodes) = validate_workflow(&workflow(), &config, Some(&object_info));
+
+    assert!(missing_nodes.is_empty());
+    assert!(errors.iter().any(|error| {
+        error.contains("workflow node `TextNode` has input `text` not reported by ComfyUI")
+    }));
+}
+
+#[test]
+fn workflow_validation_checks_h3_autogrow_schema_and_helpers() {
+    let mut config = config(PathBuf::from("workflow.json"));
+    config
+        .optional_bindings
+        .insert("reference_images".to_owned(), binding("5", "ref_images"));
+    let mut h3_workflow = workflow();
+    h3_workflow["5"] = json!({
+        "class_type": "MiniMaxH3ReferenceToVideo",
+        "inputs": {"ref_images": {}}
+    });
+    let valid_schema = json!({
+        "TextNode": {},
+        "SeedNode": {},
+        "SizeNode": {},
+        "VideoOutput": {},
+        "LoadImage": {},
+        "MiniMaxH3ReferenceToVideo": {"input": {"optional": {"ref_images": [
+            "COMFY_AUTOGROW_V3",
+            {"template": {
+                "prefix": "ref_image_",
+                "input": {"required": {"ref_image": ["IMAGE", {}]}}
+            }}
+        ]}}}
+    });
+
+    let (errors, missing_nodes) = validate_workflow(&h3_workflow, &config, Some(&valid_schema));
+    assert!(errors.is_empty());
+    assert!(missing_nodes.is_empty());
+
+    let mut invalid_schema = valid_schema;
+    invalid_schema["MiniMaxH3ReferenceToVideo"]["input"]["optional"]["ref_images"][1]["template"]
+        ["prefix"] = json!("wrong_");
+    invalid_schema.as_object_mut().unwrap().remove("LoadImage");
+    let (errors, missing_nodes) = validate_workflow(&h3_workflow, &config, Some(&invalid_schema));
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("does not match the installed H3"))
+    );
+    assert_eq!(missing_nodes, ["LoadImage"]);
+}
+
+#[test]
 fn operation_capabilities_distinguish_verified_and_unverified_bindings() {
     let mut config = config(PathBuf::from("workflow.json"));
     config.optional_bindings.extend([
@@ -111,7 +172,7 @@ fn operation_capabilities_report_missing_conditioning_bindings() {
     );
     assert_eq!(
         report.operations["r2v"].reason,
-        "missing bindings: reference_video"
+        "missing bindings: reference_images or reference_video"
     );
 }
 

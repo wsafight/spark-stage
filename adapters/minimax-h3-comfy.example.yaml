@@ -9,6 +9,7 @@ workflow: ../workflows/minimax-h3-api.json
 # Replace every placeholder with the node IDs and input names from the API workflow
 # exported by the ComfyUI instance on this DGX Spark.
 output_node: "REPLACE_OUTPUT_NODE"
+duration_binding_unit: seconds
 model_fingerprint: "REPLACE_WITH_MODEL_FILENAMES_AND_HASHES"
 bindings:
   prompt: { node: "REPLACE_PROMPT_NODE", input: "REPLACE_PROMPT_INPUT" }
@@ -22,6 +23,13 @@ profiles:
   baseline: {}
   audition: {}
   final: {}
+
+# Keep automated quality gates separate from ComfyUI workflow overrides. The
+# default max_freeze_ratio is 0.30 when a profile is omitted here.
+media_check_profiles:
+  baseline: { max_freeze_ratio: 0.30 }
+  audition: { max_freeze_ratio: 0.30 }
+  final: { max_freeze_ratio: 0.20 }
 
 # Add t2v, i2v, flf2v, or r2v only after that exact operation completes a local
 # smoke test with the current workflow, nodes, models, CUDA and PyTorch build.

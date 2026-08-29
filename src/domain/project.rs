@@ -617,6 +617,8 @@ pub struct JobJournal {
     pub profile: String,
     pub input_hash: String,
     pub adapter_fingerprint: String,
+    #[serde(default)]
+    pub smoke_test: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_take_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

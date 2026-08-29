@@ -366,7 +366,9 @@ pub(super) const fn operation_bindings(operation: Operation) -> &'static [&'stat
         Operation::T2v => &[],
         Operation::I2v => &["first_frame"],
         Operation::Flf2v => &["first_frame", "last_frame"],
-        Operation::R2v => &["reference_video"],
+        // R2V accepts either a reference video or one or more reference images.
+        // The adapter validates which concrete binding is available at prepare time.
+        Operation::R2v => &[],
     }
 }
 
@@ -396,6 +398,7 @@ pub(super) const fn command_kind(command: &WorkerCommand) -> &'static str {
         WorkerCommand::Approve { .. } => "approval.approve",
         WorkerCommand::RetryShot { .. } => "shot.retry",
         WorkerCommand::AuditionShot { .. } => "shot.audition",
+        WorkerCommand::SmokeTestShot { .. } => "shot.smoke_test",
         WorkerCommand::RenderShot { .. } => "shot.render",
         WorkerCommand::SelectTake { .. } => "take.select",
         WorkerCommand::ApproveTake { .. } => "take.approve",

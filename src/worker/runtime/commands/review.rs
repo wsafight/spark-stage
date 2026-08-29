@@ -146,7 +146,7 @@ impl WorkerRuntime {
             );
         }
         let audition = shot.selected_candidate_take_id.is_none();
-        self.enqueue_shot(request, shot_id, audition)
+        self.enqueue_shot(request, shot_id, audition, false, None)
     }
 
     pub(super) fn preview_take(&self, request: &ClientRequest, take_id: &str) -> WorkerReply {

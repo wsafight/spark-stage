@@ -1,8 +1,8 @@
 # SparkStage 技术设计
 
 **版本**：0.4<br>
-**日期**：2026-08-26<br>
-**状态**：MVP 无 GPU 实现基线；DGX/H3 集成待验证<br>
+**日期**：2026-08-29<br>
+**状态**：MVP 控制面与 DGX/H3 T2V 闭环已验证；其余生成能力与性能基线待验证<br>
 **目标平台**：NVIDIA DGX Spark（Linux aarch64）<br>
 **Rust 基线**：rustc 1.98.0，edition 2024<br>
 **产品合同**：[product.md](product.md)<br>
@@ -501,6 +501,10 @@ optional_bindings:
 
 preflight 校验 workflow 文件 hash、节点存在、input 名、输出节点和模型文件。可选 binding 缺失会让相关 capability 变成 `unsupported` 或 `degraded`，不会影响已经验证的 T2V。
 
+ComfyUI V3 的 autogrow 输入在 API prompt 中使用点路径，例如 H3 的 `ref_images.ref_image_0`；服务端执行前会把这些路径还原为节点需要的嵌套 map。adapter 不得把参考图 links 写成单个 `ref_images: { ... }` 值，否则 ComfyUI 会忽略动态输入。H3 的 `ref_videos` 同样是 autogrow 的 `IMAGE` 帧流，不是可直接填入文件名的字符串；在完成视频加载、帧提取和真实烟测前保持该能力未配置。
+
+首次能力认证使用显式 `shots smoke-test --accept-unverified`，它仍经过项目审批、预算、持久 job、worker GPU 队列、adapter、媒体检查和 take 血缘，只对本次单 take 跳过“已经 verified”这一循环前置条件。普通 audition / final 不接受此豁免；smoke-test 成功也不会自动修改配置，必须先人工核对 job、媒体探针和输出，再记录对应 `verified_operations`。
+
 ### 12.4 安全投递协议
 
 1. 首次执行创建 job id 和 reserved take id；每次投递创建新的 attempt request id 与完整 PreparedAttempt。
@@ -578,7 +582,7 @@ approval_gates: [project_test, candidate_selection, mvp_final_visual_review]
 - 音视频时长偏差在 pipeline 容差内
 - 文件非零、无长黑帧、无长静帧和异常静音
 
-时长容差默认取一帧与 100ms 中较大者，最终以 H3 实测和拼片需求校准。阈值写进 profile，不散落在 Rust 分支中。
+静帧使用 FFmpeg `freezedetect`（最短 1.5 秒）检测并汇总闭合区间与延伸到 EOF 的开放区间。`media_check_profiles` 按生成 profile 配置允许的总冻结占比；未配置时默认 30%，当前 H3 adapter 的 baseline/audition 为 30%、final 为 20%。配置必须落在 0.0–1.0，且名称必须对应已有生成 profile，adapter preflight 在投递前拒绝非法值。其它阈值继续按 H3 实测和拼片需求校准。
 
 ### 15.2 ffmpeg 调用
 
@@ -730,7 +734,7 @@ MVP 不依赖 Kitty / Sixel 等终端图片协议。`preview` 向 worker 请求�
 - Ratatui TestBackend 的宽 / 窄布局与关键状态快照
 - panic 和退出后的终端恢复单元边界
 
-GitHub Actions 在 Linux/macOS 上执行 fmt、严格 Clippy 和 all-target tests；Linux 安装标准 FFmpeg，使合成媒体测试走完整路径。CI 还要求每个 Rust 文件少于 900 行，超过阈值时应按职责拆分模块，而不是压缩格式。另有 Linux aarch64 cross-check、`cargo llvm-cov --fail-under-lines 70`、`cargo audit --deny warnings` 和 `cargo deny check`。当前本地无 GPU 基线为 232 个测试；最近已记录的行覆盖率为 70.07%，本次变更未重跑覆盖率，仍由 CI 的 70% 门禁复核。关键纯逻辑目标为 85%+。全局覆盖率先稳定在 70%–75%，不为统一达到 90% 测试终端 raw mode、平台外壳或未接入的 DGX/H3 路径。本地随应用附带的裁剪版 FFmpeg 若缺 lavfi 源会在 fixture preflight 阶段跳过，因此本地“测试通过”不能代替 CI 的标准 FFmpeg 结果。
+GitHub Actions 在 Linux/macOS 上执行 fmt、严格 Clippy 和 all-target tests；Linux 安装标准 FFmpeg，使合成媒体测试走完整路径。CI 还要求每个 Rust 文件少于 900 行，超过阈值时应按职责拆分模块，而不是压缩格式。另有 Linux aarch64 cross-check、`cargo llvm-cov --fail-under-lines 70`、`cargo audit --deny warnings` 和 `cargo deny check`。当前本地无 GPU 基线为 243 个测试（240 个单元测试和 3 个 CLI 集成测试）；最近已记录的行覆盖率为 70.07%，本次变更未重跑覆盖率，仍由 CI 的 70% 门禁复核。关键纯逻辑目标为 85%+。全局覆盖率先稳定在 70%–75%，不为统一达到 90% 测试终端 raw mode、平台外壳或未接入的 DGX/H3 路径。本地随应用附带的裁剪版 FFmpeg 若缺 lavfi 源会在 fixture preflight 阶段跳过，因此本地“测试通过”不能代替 CI 的标准 FFmpeg 结果。
 
 ### 22.2 DGX Spark 集成测试
 
@@ -748,7 +752,7 @@ GitHub Actions 在 Linux/macOS 上执行 fmt、严格 Clippy 和 all-target test
 
 ## 23. 实施顺序
 
-### Phase 0：冻结事实（合同完成，H3 事实待 DGX）
+### Phase 0：冻结事实（合同与 H3 T2V 事实已完成）
 
 - 冻结 CreativeBrief / ScriptBundle 边界和 `screenwriter` skill 的最小输出
 - 导出 H3 API workflow
@@ -761,7 +765,7 @@ GitHub Actions 在 Linux/macOS 上执行 fmt、严格 Clippy 和 all-target test
 - brief / script bundle / authoring receipt / bible index / shot / state / approval / job / attempt / take 类型
 - 只读 `sparkstage preflight`、`sparkstage script validate` 和 store / schema 测试；本阶段不暴露会写状态的 `project new`
 
-### Phase 2：最小 worker 与 ComfyUI（控制面和 mock 已完成，真实 binding 待 DGX）
+### Phase 2：最小 worker 与 ComfyUI（控制面、mock 和真实 T2V binding 已完成）
 
 - Unix socket、命令幂等、revision
 - 通过 worker 交付 `sparkstage project new` 和 `sparkstage project status --json`
@@ -769,13 +773,13 @@ GitHub Actions 在 Linux/macOS 上执行 fmt、严格 Clippy 和 all-target test
 - `script validate`、`script apply`、文案包批准与原子提升
 - adapter 的 submit / WebSocket / history / backend failure / output / recovery
 
-### Phase 2.5：生产链 benchmark（记录控制面已完成，真实实验待 DGX）
+### Phase 2.5：生产链 benchmark（控制面和首轮 DGX T2V 样本已完成）
 
 - `sparkstage benchmark h3` 复用 worker、GPU 锁和 camera adapter
 - 建立可信 baseline，再验证 audition / final、attention、compile、cache 和量化 profile
 - 原始产物写入应用数据目录，仓库只保留小型汇总结论
 
-### Phase 3：出镜闭环（状态、媒体和 build 逻辑完成，真实 H3 输出待验收）
+### Phase 3：出镜闭环（状态、媒体和 build 逻辑完成，真实 T2V 单镜已验收）
 
 - audition、select、promote、direct render、retry、approve
 - ffprobe 硬检查、take 血缘、首尾帧和报告
@@ -797,18 +801,16 @@ GitHub Actions 在 Linux/macOS 上执行 fmt、严格 Clippy 和 all-target test
 
 ### 23.1 当前实现边界
 
-截至 2026-08-26，本地代码与无 GPU 测试已覆盖项目存储、worker IPC、文案合同批准、队列暂停/恢复/取消、候选与 take 决策、自动 audition 批次、build 执行与恢复、参考素材管理与精确 stale 传播、SRT/VTT 字幕、人工终片 gate、预算估算/审批/磁盘硬线、两阶段 decision 恢复、可恢复清理、七类本机里程碑 hook、Ratatui 10 页控制面、项目 TAR 归档/无覆盖导入和 `0.9 -> 1.0` 迁移备份。两个独立完整 ScriptBundle fixture 与一个拒绝样例通过固定 contract suite 和稳定评测报告；ComfyUI mock 已验证 `/prompt` request identity、`/history` 成功与执行失败、WebSocket 断线后的 history 收口、非法输出路径拒绝和全局 interrupt 协议。这里的“已覆盖”表示控制逻辑、状态转换和错误路径可测试，不表示 MiniMax H3 workflow、DGX Spark 性能或外部模型文案质量已经验证。
+截至 2026-08-29，本地代码与无 GPU 测试已覆盖项目存储、worker IPC、文案合同批准、队列暂停/恢复/取消、候选与 take 决策、自动 audition 批次、build 执行与恢复、参考素材管理与精确 stale 传播、SRT/VTT 字幕、人工终片 gate、预算估算/审批/磁盘硬线、两阶段 decision 恢复、可恢复清理、七类本机里程碑 hook、Ratatui 10 页控制面、项目 TAR 归档/无覆盖导入和 `0.9 -> 1.0` 迁移备份。两个独立完整 ScriptBundle fixture 与一个拒绝样例通过固定 contract suite 和稳定评测报告；ComfyUI mock 已验证 `/prompt` request identity、`/history` 成功与执行失败、WebSocket 断线后的 history 收口、非法输出路径拒绝和全局 interrupt 协议。DGX Spark 上的生产 worker 还完成了一次真实 H3 T2V smoke take，验证了 prompt、seed、输出前缀、模型指纹、原生音轨、媒体硬检查和完整 job/take 血缘。该单次结果不代表性能基线、其它生成操作或外部模型文案质量已经验证。
 
-仍需在 DGX Spark 完成：导出并绑定真实 H3 API workflow，确认 prompt、seed、输出、模型指纹和原生音轨，实测 T2V 与任何 I2V / FLF2V / R2V 能力，用真实 H3 素材验证完整 FFmpeg build 与联系表产物，以及记录 audition/final 的冷启动、稳态耗时、显存和质量基线。在这些结果落盘前，相关 capability 必须保持未验证或禁用，预算 source 保持 `unmeasured_default_v1`。
+仍需在 DGX Spark 完成：分别实测 I2V / FLF2V / R2V，用真实 H3 素材验证完整两镜 FFmpeg build 与联系表产物，并记录 audition/final 的冷启动、稳态耗时、显存和质量基线。除已通过烟测的 T2V 外，相关 capability 必须保持未验证或禁用；在性能样本形成有效基线前，预算 source 保持 `unmeasured_default_v1`。
 
-## 24. 开工前仍需实测的事实
+## 24. 仍需实测的事实
 
 以下不是架构讨论题，必须从当前 DGX Spark 与 workflow 得到答案：
 
-- 当前 H3 API workflow 的真实输入、输出节点和模型文件
-- 是否支持稳定的 output prefix 或 metadata request 标记
-- `/history` 中能否用 request 标记对账未知提交
-- 当前工作流是否真的支持原生音频、I2V、FLF2V 或 R2V
+- 当前工作流的 I2V、FLF2V 和 R2V conditioning 是否会真实影响输出
+- 参考视频经 `LoadVideo -> GetVideoComponents` 转为 H3 IMAGE 帧流后的质量与成本
 - ComfyUI 是由 SparkStage 托管还是作为 attached 服务运行
 - audition profile 的分辨率、帧数、步数和三抽成本
 - DGX Spark 上 Ratatui / Crossterm 和播放器命令的实际兼容性

@@ -48,6 +48,7 @@ pub fn scaffold_comfy_adapter(
         allow_global_interrupt: false,
         workflow,
         output_node: request.output_node,
+        duration_binding_unit: super::DurationBindingUnit::Seconds,
         model_fingerprint: Some(request.model_fingerprint),
         bindings,
         optional_bindings: request.optional_bindings,
@@ -56,6 +57,7 @@ pub fn scaffold_comfy_adapter(
             ("baseline".to_owned(), BTreeMap::new()),
             ("final".to_owned(), BTreeMap::new()),
         ]),
+        media_check_profiles: BTreeMap::new(),
         verified_operations: Vec::new(),
     };
     let adapter = ComfyAdapter::new(config.clone())?;

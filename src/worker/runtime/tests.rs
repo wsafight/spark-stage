@@ -281,6 +281,15 @@ verified_operations: [t2v]
     config
 }
 
+fn unverified_adapter(directory: &Path) -> PathBuf {
+    let config = verified_adapter(directory);
+    let source = fs::read_to_string(&config)
+        .unwrap()
+        .replace("verified_operations: [t2v]", "verified_operations: []");
+    fs::write(&config, source).unwrap();
+    config
+}
+
 fn interrupting_adapter(directory: &Path) -> (PathBuf, std::sync::mpsc::Receiver<String>) {
     use std::io::{Read as _, Write as _};
 
@@ -485,6 +494,46 @@ fn audition_command_persists_job_and_gpu_queue_entry() {
     assert_eq!(job.profile, "audition");
     assert_eq!(job.state, JobState::Queued);
     assert!(job.attempts.is_empty());
+}
+
+#[test]
+fn smoke_test_is_the_only_command_that_can_queue_an_unverified_adapter() {
+    let directory = tempfile::tempdir().unwrap();
+    let paths = AppPaths::resolve(Some(directory.path().join("data")), None);
+    let adapter = unverified_adapter(directory.path());
+    let mut runtime = WorkerRuntime::open_with_adapter(paths.clone(), Some(adapter)).unwrap();
+    approved_project(&mut runtime);
+
+    let rejected = runtime.handle(request(
+        Some("rain-apartment"),
+        Some(3),
+        WorkerCommand::AuditionShot {
+            shot_id: "S01".to_owned(),
+        },
+    ));
+    assert!(!rejected.ok);
+    assert_eq!(rejected.error.unwrap().code, "CAPABILITY_MISS");
+
+    let queued = runtime.handle(request(
+        Some("rain-apartment"),
+        Some(3),
+        WorkerCommand::SmokeTestShot {
+            shot_id: "S01".to_owned(),
+            seed: Some(6049946667774612715),
+        },
+    ));
+    assert!(queued.ok, "{queued:?}");
+    assert_eq!(
+        queued.message.as_deref(),
+        Some("unverified adapter smoke-test take queued")
+    );
+    let store = ProjectStore::open(&paths.projects_dir, "rain-apartment").unwrap();
+    let state = store.read_state().unwrap();
+    assert_eq!(state.shots["S01"].audition_target_takes, Some(1));
+    assert_eq!(runtime.queue.pending.len(), 1);
+    let job = store.read_job(&runtime.queue.pending[0].job_id).unwrap();
+    assert!(job.smoke_test);
+    assert_eq!(job.seed, 6049946667774612715);
 }
 
 #[test]

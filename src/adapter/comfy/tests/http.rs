@@ -120,6 +120,222 @@ async fn submit_posts_prompt_with_stable_request_identity() {
 }
 
 #[tokio::test]
+async fn upload_project_file_posts_safe_project_input() {
+    let (endpoint, mut requests) = spawn_http_sequence(vec![MockResponse {
+        status: "200 OK",
+        body: json!({"name": "frame.png", "subfolder": "sparkstage/refs"}),
+    }])
+    .await;
+    let adapter = adapter_for(endpoint).await;
+    let project = tempfile::tempdir().unwrap();
+    std::fs::create_dir(project.path().join("refs")).unwrap();
+    std::fs::write(project.path().join("refs/frame.png"), b"png-data").unwrap();
+
+    let remote = adapter
+        .upload_project_file(project.path(), "refs/frame.png")
+        .await
+        .unwrap();
+
+    assert_eq!(remote, "sparkstage/refs/frame.png");
+    let request = requests.recv().await.unwrap();
+    assert!(request.starts_with("POST /upload/image HTTP/1.1"));
+    assert!(request.contains("frame.png"));
+    assert!(request.contains("png-data"));
+}
+
+#[tokio::test]
+async fn upload_project_file_rejects_traversal_and_symlink_inputs() {
+    let adapter = adapter_for("http://127.0.0.1:1/".to_owned()).await;
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(project.path().join("inside.png"), b"png-data").unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("outside.png"), b"png-data").unwrap();
+    std::os::unix::fs::symlink(
+        outside.path().join("outside.png"),
+        project.path().join("link.png"),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        adapter
+            .upload_project_file(project.path(), "../outside.png")
+            .await,
+        Err(AdapterError::UnsafeOutput(_))
+    ));
+    assert!(matches!(
+        adapter
+            .upload_project_file(project.path(), "link.png")
+            .await,
+        Err(AdapterError::UnsafeOutput(_))
+    ));
+}
+
+#[tokio::test]
+async fn upload_project_file_rejects_invalid_backend_filename() {
+    let (endpoint, _) = spawn_http_sequence(vec![MockResponse {
+        status: "200 OK",
+        body: json!({"name": "", "subfolder": "sparkstage/refs"}),
+    }])
+    .await;
+    let adapter = adapter_for(endpoint).await;
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(project.path().join("frame.png"), b"png-data").unwrap();
+
+    assert!(matches!(
+        adapter
+            .upload_project_file(project.path(), "frame.png")
+            .await,
+        Err(AdapterError::UnsafeOutput(_))
+    ));
+}
+
+#[tokio::test]
+async fn prepare_builds_dynamic_h3_reference_image_nodes() {
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(project.path().join("one.png"), b"one").unwrap();
+    std::fs::write(project.path().join("two.png"), b"two").unwrap();
+    let workflow_path = project.path().join("workflow.json");
+    std::fs::write(
+        &workflow_path,
+        serde_json::to_vec(&json!({
+            "45": {"class_type": "Text", "inputs": {"text": ""}},
+            "78": {"class_type": "Seed", "inputs": {"noise_seed": 0}},
+            "90": {"class_type": "Size", "inputs": {"width": 1, "height": 1}},
+            "5": {"class_type": "H3", "inputs": {"ref_images": {}}},
+            "120": {"class_type": "Output", "inputs": {"filename_prefix": "out"}}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let mut config = super::config(workflow_path.clone());
+    config.output_node = "120".to_owned();
+    config.workflow = workflow_path;
+    config.optional_bindings.insert(
+        "reference_images".to_owned(),
+        WorkflowBinding {
+            node: "5".to_owned(),
+            input: "ref_images".to_owned(),
+        },
+    );
+    let (endpoint, mut requests) = spawn_http_sequence(vec![
+        MockResponse {
+            status: "200 OK",
+            body: json!({"name": "one.png", "subfolder": ""}),
+        },
+        MockResponse {
+            status: "200 OK",
+            body: json!({"name": "two.png", "subfolder": ""}),
+        },
+    ])
+    .await;
+    config.endpoint = endpoint;
+    let adapter = ComfyAdapter::new(config).unwrap();
+
+    let prepared = adapter
+        .prepare(GenerationRequest {
+            request_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+            project_root: project.path().to_owned(),
+            operation: Operation::R2v,
+            prompt: "test".to_owned(),
+            seed: 7,
+            width: 1344,
+            height: 768,
+            fps: 24,
+            duration_seconds: 10,
+            profile: "audition".to_owned(),
+            first_frame: None,
+            last_frame: None,
+            reference_images: vec!["one.png".to_owned(), "two.png".to_owned()],
+            reference_video: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(prepared.workflow["121"]["class_type"], "LoadImage");
+    assert_eq!(prepared.workflow["122"]["inputs"]["image"], "two.png");
+    assert_eq!(
+        prepared.workflow["5"]["inputs"]["ref_images.ref_image_0"],
+        json!(["121", 0])
+    );
+    assert_eq!(
+        prepared.workflow["5"]["inputs"]["ref_images.ref_image_1"],
+        json!(["122", 0])
+    );
+    assert!(prepared.workflow["5"]["inputs"].get("ref_images").is_none());
+    assert!(requests.recv().await.is_some());
+    assert!(requests.recv().await.is_some());
+}
+
+#[tokio::test]
+async fn prepare_builds_h3_reference_video_frame_stream() {
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(project.path().join("clip.mp4"), b"video").unwrap();
+    let workflow_path = project.path().join("workflow.json");
+    std::fs::write(
+        &workflow_path,
+        serde_json::to_vec(&json!({
+            "45": {"class_type": "Text", "inputs": {"text": ""}},
+            "78": {"class_type": "Seed", "inputs": {"noise_seed": 0}},
+            "90": {"class_type": "Size", "inputs": {"width": 1, "height": 1}},
+            "5": {"class_type": "H3", "inputs": {"ref_images": {}, "ref_videos": {}}},
+            "120": {"class_type": "Output", "inputs": {"filename_prefix": "out"}}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let mut config = super::config(workflow_path.clone());
+    config.output_node = "120".to_owned();
+    config.workflow = workflow_path;
+    config.optional_bindings.insert(
+        "reference_video".to_owned(),
+        WorkflowBinding {
+            node: "5".to_owned(),
+            input: "ref_videos".to_owned(),
+        },
+    );
+    let (endpoint, mut requests) = spawn_http_sequence(vec![MockResponse {
+        status: "200 OK",
+        body: json!({"name": "clip.mp4", "subfolder": ""}),
+    }])
+    .await;
+    config.endpoint = endpoint;
+    let adapter = ComfyAdapter::new(config).unwrap();
+
+    let prepared = adapter
+        .prepare(GenerationRequest {
+            request_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+            project_root: project.path().to_owned(),
+            operation: Operation::R2v,
+            prompt: "test".to_owned(),
+            seed: 7,
+            width: 1344,
+            height: 768,
+            fps: 24,
+            duration_seconds: 10,
+            profile: "audition".to_owned(),
+            first_frame: None,
+            last_frame: None,
+            reference_images: Vec::new(),
+            reference_video: Some("clip.mp4".to_owned()),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(prepared.workflow["121"]["class_type"], "LoadVideo");
+    assert_eq!(prepared.workflow["121"]["inputs"]["file"], "clip.mp4");
+    assert_eq!(
+        prepared.workflow["122"]["inputs"]["video"],
+        json!(["121", 0])
+    );
+    assert_eq!(
+        prepared.workflow["5"]["inputs"]["ref_videos.ref_video_0"],
+        json!(["122", 0])
+    );
+    assert!(prepared.workflow["5"]["inputs"].get("ref_videos").is_none());
+    assert!(requests.recv().await.is_some());
+}
+
+#[tokio::test]
 async fn submit_rejects_empty_prompt_id() {
     let (endpoint, _) = spawn_http_sequence(vec![MockResponse {
         status: "200 OK",

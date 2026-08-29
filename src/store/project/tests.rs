@@ -387,6 +387,7 @@ fn replacement_bundle_cannot_be_approved_while_a_shot_job_is_active() {
         profile: shot.generation_plan.audition_profile.clone(),
         input_hash: "input".to_owned(),
         adapter_fingerprint: "adapter".to_owned(),
+        smoke_test: false,
         parent_take_id: None,
         promotion_strategy: None,
         state: JobState::Queued,

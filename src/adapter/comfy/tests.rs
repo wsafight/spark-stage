@@ -23,6 +23,7 @@ pub(super) fn config(workflow: PathBuf) -> ComfyAdapterConfig {
         allow_global_interrupt: false,
         workflow,
         output_node: "120".to_owned(),
+        duration_binding_unit: DurationBindingUnit::Seconds,
         model_fingerprint: Some("test-model".to_owned()),
         bindings: BTreeMap::from([
             (
@@ -63,6 +64,7 @@ pub(super) fn config(workflow: PathBuf) -> ComfyAdapterConfig {
         ]),
         optional_bindings: BTreeMap::new(),
         profiles: BTreeMap::from([("audition".to_owned(), BTreeMap::new())]),
+        media_check_profiles: BTreeMap::new(),
         verified_operations: Vec::new(),
     }
 }
@@ -85,8 +87,10 @@ async fn prepare_changes_only_declared_bindings() {
             fps: 24,
             duration_seconds: 5,
             profile: "audition".to_owned(),
+            project_root: directory.path().to_owned(),
             first_frame: None,
             last_frame: None,
+            reference_images: Vec::new(),
             reference_video: None,
         })
         .await
@@ -108,6 +112,30 @@ fn remote_endpoint_requires_explicit_opt_in() {
     assert!(matches!(
         ComfyAdapter::new(config),
         Err(AdapterError::Endpoint(_))
+    ));
+}
+
+#[test]
+fn media_check_profiles_must_be_valid_and_match_generation_profiles() {
+    let mut invalid_ratio = config(PathBuf::from("workflow.json"));
+    invalid_ratio.media_check_profiles.insert(
+        "audition".to_owned(),
+        MediaCheckPolicy {
+            max_freeze_ratio: 1.5,
+        },
+    );
+    assert!(matches!(
+        invalid_ratio.validate(),
+        Err(AdapterError::Config(message)) if message.contains("max_freeze_ratio")
+    ));
+
+    let mut unknown_profile = config(PathBuf::from("workflow.json"));
+    unknown_profile
+        .media_check_profiles
+        .insert("unknown".to_owned(), MediaCheckPolicy::default());
+    assert!(matches!(
+        unknown_profile.validate(),
+        Err(AdapterError::Config(message)) if message.contains("no matching generation profile")
     ));
 }
 
@@ -135,4 +163,10 @@ fn history_and_queue_states_are_structural() {
         queue_state(&json!({"queue_pending": [[1, "prompt-1", {}]]}), "prompt-1"),
         BackendState::Queued
     );
+}
+
+#[test]
+fn h3_duration_uses_aligned_frame_counts() {
+    assert_eq!(super::h3_frame_count(5, 24), 124);
+    assert_eq!(super::h3_frame_count(10, 24), 243);
 }

@@ -39,11 +39,55 @@ pub struct BoundaryFrames {
     pub handoff_candidate: PathBuf,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MediaCheckPolicy {
+    #[serde(default = "default_max_freeze_ratio")]
+    pub max_freeze_ratio: f64,
+}
+
+impl Default for MediaCheckPolicy {
+    fn default() -> Self {
+        Self {
+            max_freeze_ratio: default_max_freeze_ratio(),
+        }
+    }
+}
+
+impl MediaCheckPolicy {
+    pub fn validate(self) -> Result<(), String> {
+        if self.max_freeze_ratio.is_finite() && (0.0..=1.0).contains(&self.max_freeze_ratio) {
+            Ok(())
+        } else {
+            Err("max_freeze_ratio must be finite and between 0.0 and 1.0".to_owned())
+        }
+    }
+}
+
+const fn default_max_freeze_ratio() -> f64 {
+    0.30
+}
+
 pub fn inspect(
     path: &Path,
     expected_duration_seconds: u32,
     require_audio: bool,
 ) -> Result<MediaReport, MediaError> {
+    inspect_with_policy(
+        path,
+        expected_duration_seconds,
+        require_audio,
+        MediaCheckPolicy::default(),
+    )
+}
+
+pub fn inspect_with_policy(
+    path: &Path,
+    expected_duration_seconds: u32,
+    require_audio: bool,
+    policy: MediaCheckPolicy,
+) -> Result<MediaReport, MediaError> {
+    policy.validate().map_err(MediaError::InvalidPolicy)?;
     let output = Command::new("ffprobe")
         .args([
             "-v",
@@ -100,11 +144,9 @@ pub fn inspect(
         &["-vf", "blackdetect=d=0.5:pix_th=0.10", "-an"],
         "black_duration:",
     )?;
-    let freeze = filter_metric(
-        path,
-        &["-vf", "freezedetect=n=-50dB:d=1.5", "-an"],
-        "freeze_duration:",
-    )?;
+    let freeze_log = filter_log(path, &["-vf", "freezedetect=n=-50dB:d=1.5", "-an"])?;
+    let freeze =
+        sum_metric_with_open_interval(&freeze_log, "freeze_duration:", "freeze_start:", duration);
     let silence = if audio_channels.is_some() {
         Some(filter_metric(
             path,
@@ -116,7 +158,8 @@ pub fn inspect(
     };
 
     let black_ok = black < duration * 0.8;
-    let freeze_ok = freeze < duration * 0.95;
+    let freeze_ratio = freeze / duration;
+    let freeze_ok = freeze_ratio <= policy.max_freeze_ratio;
     let silence_ok = silence.is_none_or(|seconds| seconds < duration * 0.9);
     let checks = vec![
         check(
@@ -147,7 +190,11 @@ pub fn inspect(
         check(
             "FREEZE_LIMIT",
             freeze_ok,
-            format!("{freeze:.3}s detected as frozen"),
+            format!(
+                "{freeze:.3}s detected as frozen ({:.1}% of media; limit {:.1}%)",
+                freeze_ratio * 100.0,
+                policy.max_freeze_ratio * 100.0
+            ),
         ),
         check(
             "SILENCE_LIMIT",
@@ -225,7 +272,7 @@ pub fn extract_boundaries(
         handoff_candidate: review_dir.join(format!("{take_id}-handoff-candidate.jpg")),
     };
     extract_frame(media, &frames.first, 0.05_f64.min(duration_seconds / 2.0))?;
-    extract_frame(media, &frames.last, (duration_seconds - 0.05).max(0.0))?;
+    extract_last_frame(media, &frames.last, duration_seconds)?;
     extract_frame(
         media,
         &frames.handoff_candidate,
@@ -261,7 +308,47 @@ fn extract_frame(media: &Path, output: &Path, seconds: f64) -> Result<(), MediaE
     }
 }
 
+fn extract_last_frame(
+    media: &Path,
+    output: &Path,
+    duration_seconds: f64,
+) -> Result<(), MediaError> {
+    let lookback = duration_seconds.clamp(0.05, 1.0);
+    let result = Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-y",
+            "-sseof",
+        ])
+        .arg(format!("-{lookback:.3}"))
+        .arg("-i")
+        .arg(media)
+        .args(["-map", "0:v:0", "-an", "-q:v", "2", "-update", "1"])
+        .arg(output)
+        .output()
+        .map_err(|source| MediaError::Command {
+            program: "ffmpeg",
+            source,
+        })?;
+    if result.status.success() && output.is_file() {
+        Ok(())
+    } else if result.status.success() {
+        Err(MediaError::FilterFailed(
+            "ffmpeg produced no last frame".to_owned(),
+        ))
+    } else {
+        Err(MediaError::FilterFailed(last_line(&result.stderr)))
+    }
+}
+
 fn filter_metric(path: &Path, filter_args: &[&str], marker: &str) -> Result<f64, MediaError> {
+    Ok(sum_metric(&filter_log(path, filter_args)?, marker))
+}
+
+fn filter_log(path: &Path, filter_args: &[&str]) -> Result<String, MediaError> {
     let output = Command::new("ffmpeg")
         .args(["-hide_banner", "-nostdin", "-i"])
         .arg(path)
@@ -275,7 +362,7 @@ fn filter_metric(path: &Path, filter_args: &[&str], marker: &str) -> Result<f64,
     if !output.status.success() {
         return Err(MediaError::FilterFailed(last_line(&output.stderr)));
     }
-    Ok(sum_metric(&String::from_utf8_lossy(&output.stderr), marker))
+    Ok(String::from_utf8_lossy(&output.stderr).into_owned())
 }
 
 fn command_listing(argument: &str) -> Result<String, MediaError> {
@@ -321,12 +408,42 @@ fn parse_rate(value: &str) -> Option<f64> {
 }
 
 fn sum_metric(source: &str, marker: &str) -> f64 {
-    source
-        .lines()
-        .flat_map(str::split_whitespace)
-        .filter_map(|field| field.strip_prefix(marker))
-        .filter_map(|value| value.parse::<f64>().ok())
-        .sum()
+    metric_values(source, marker).into_iter().sum()
+}
+
+fn sum_metric_with_open_interval(
+    source: &str,
+    duration_marker: &str,
+    start_marker: &str,
+    total_duration: f64,
+) -> f64 {
+    let durations = metric_values(source, duration_marker);
+    let starts = metric_values(source, start_marker);
+    let mut total = durations.iter().sum();
+    if starts.len() > durations.len()
+        && let Some(start) = starts.last()
+    {
+        total += (total_duration - start).max(0.0);
+    }
+    total
+}
+
+fn metric_values(source: &str, marker: &str) -> Vec<f64> {
+    let fields = source.split_whitespace().collect::<Vec<_>>();
+    fields
+        .iter()
+        .enumerate()
+        .filter_map(|(index, field)| {
+            let marker_position = field.rfind(marker)?;
+            let attached = &field[marker_position + marker.len()..];
+            let value = if attached.is_empty() {
+                *fields.get(index + 1)?
+            } else {
+                attached
+            };
+            value.parse::<f64>().ok()
+        })
+        .collect()
 }
 
 fn first_line(bytes: &[u8]) -> String {
@@ -385,6 +502,8 @@ pub enum MediaError {
     Decode(#[from] serde_json::Error),
     #[error("ffmpeg media check failed: {0}")]
     FilterFailed(String),
+    #[error("invalid media check policy: {0}")]
+    InvalidPolicy(String),
     #[error("cannot access `{path}`: {source}")]
     Io {
         path: PathBuf,
@@ -412,6 +531,48 @@ mod tests {
     fn sums_repeated_detector_durations() {
         let log = "black_start:0 black_duration:1.25\nblack_start:4 black_duration:0.75";
         assert_eq!(sum_metric(log, "black_duration:"), 2.0);
+    }
+
+    #[test]
+    fn parses_namespaced_metrics_and_counts_an_interval_open_at_eof() {
+        let closed = "lavfi.freezedetect.freeze_start: 0.5 \
+                      lavfi.freezedetect.freeze_duration: 1.25";
+        assert_eq!(sum_metric(closed, "freeze_duration:"), 1.25);
+        assert_eq!(
+            sum_metric_with_open_interval(closed, "freeze_duration:", "freeze_start:", 2.0),
+            1.25
+        );
+
+        let open = "[freezedetect] lavfi.freezedetect.freeze_start: 0";
+        assert_eq!(
+            sum_metric_with_open_interval(open, "freeze_duration:", "freeze_start:", 2.0),
+            2.0
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_media_check_policy() {
+        assert!(
+            MediaCheckPolicy {
+                max_freeze_ratio: f64::NAN,
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            MediaCheckPolicy {
+                max_freeze_ratio: 1.01,
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            MediaCheckPolicy {
+                max_freeze_ratio: 0.0,
+            }
+            .validate()
+            .is_ok()
+        );
     }
 
     #[test]
@@ -513,6 +674,46 @@ mod tests {
         assert_check(&static_report, "FREEZE_LIMIT", MediaCheckStatus::Fail);
         let silent_report = inspect(&silent, 2, true).unwrap();
         assert_check(&silent_report, "SILENCE_LIMIT", MediaCheckStatus::Fail);
+    }
+
+    #[test]
+    fn profile_freeze_limit_rejects_observed_short_video_regression() {
+        if !synthetic_runtime_available() {
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let media = directory.path().join("partial-freeze.mp4");
+        generate_video(
+            &media,
+            "testsrc2=size=160x96:rate=24:duration=3.292[move];\
+             color=c=red:s=160x96:r=24:d=1.875[still];\
+             [move][still]concat=n=2:v=1:a=0",
+            None,
+        );
+
+        let strict = inspect_with_policy(
+            &media,
+            5,
+            false,
+            MediaCheckPolicy {
+                max_freeze_ratio: 0.30,
+            },
+        )
+        .unwrap();
+        assert_check(&strict, "FREEZE_LIMIT", MediaCheckStatus::Fail);
+        assert!(!strict.valid, "{strict:#?}");
+
+        let lenient = inspect_with_policy(
+            &media,
+            5,
+            false,
+            MediaCheckPolicy {
+                max_freeze_ratio: 0.40,
+            },
+        )
+        .unwrap();
+        assert_check(&lenient, "FREEZE_LIMIT", MediaCheckStatus::Pass);
+        assert!(lenient.valid, "{lenient:#?}");
     }
 
     #[test]

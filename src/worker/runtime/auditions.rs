@@ -129,6 +129,7 @@ impl WorkerRuntime {
             profile: profile.clone(),
             input_hash,
             adapter_fingerprint,
+            smoke_test: false,
             parent_take_id: None,
             promotion_strategy: None,
             state: JobState::Queued,

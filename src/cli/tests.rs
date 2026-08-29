@@ -138,6 +138,45 @@ fn shot_decision_commands_parse_stable_ids() {
 }
 
 #[test]
+fn smoke_test_requires_explicit_unverified_acceptance() {
+    assert!(
+        Cli::try_parse_from([
+            "sparkstage",
+            "shots",
+            "smoke-test",
+            "--project",
+            "rain-apartment",
+            "--shot",
+            "S01",
+        ])
+        .is_err()
+    );
+    let parsed = Cli::try_parse_from([
+        "sparkstage",
+        "shots",
+        "smoke-test",
+        "--project",
+        "rain-apartment",
+        "--shot",
+        "S01",
+        "--seed",
+        "6049946667774612715",
+        "--accept-unverified",
+    ])
+    .unwrap();
+    assert!(matches!(
+        parsed.command,
+        Command::Shots(ShotsArgs {
+            command: ShotsCommand::SmokeTest {
+                accept_unverified: true,
+                seed: Some(6049946667774612715),
+                ..
+            }
+        })
+    ));
+}
+
+#[test]
 fn edit_commands_parse_build_kind_and_build_id() {
     let cli = Cli::try_parse_from([
         "sparkstage",

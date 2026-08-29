@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use super::*;
+use crate::adapter::DurationBindingUnit;
 use crate::adapter::WorkflowBinding;
 use crate::domain::{
     AttemptJournal, AttemptState, Conditioning, JobState, Operation, ScriptBundle,
@@ -27,6 +28,7 @@ fn context(adapter_config: PathBuf) -> ExecutionContext {
             profile: "audition".to_owned(),
             input_hash: "input-hash".to_owned(),
             adapter_fingerprint: "adapter-hash".to_owned(),
+            smoke_test: false,
             parent_take_id: None,
             promotion_strategy: None,
             state: JobState::Active,
@@ -68,6 +70,7 @@ fn adapter_config(directory: &Path, broken_prompt: bool) -> PathBuf {
         allow_global_interrupt: false,
         workflow,
         output_node: "3".to_owned(),
+        duration_binding_unit: DurationBindingUnit::Seconds,
         model_fingerprint: Some("model-test".to_owned()),
         bindings: BTreeMap::from([
             (
@@ -94,6 +97,7 @@ fn adapter_config(directory: &Path, broken_prompt: bool) -> PathBuf {
         ]),
         optional_bindings: BTreeMap::new(),
         profiles: BTreeMap::from([("audition".to_owned(), BTreeMap::new())]),
+        media_check_profiles: BTreeMap::new(),
         verified_operations: Vec::new(),
     };
     let path = directory.join("adapter.yaml");

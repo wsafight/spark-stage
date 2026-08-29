@@ -242,6 +242,22 @@ enum ShotsCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Queue one lineage-tracked take for initial adapter certification.
+    SmokeTest {
+        #[arg(long, value_name = "PROJECT_ID")]
+        project: String,
+        #[arg(long, value_name = "SHOT_ID")]
+        shot: String,
+        /// Fix the seed for controlled adapter and profile comparisons.
+        #[arg(long, value_name = "SEED")]
+        seed: Option<u64>,
+        #[arg(long, required = true)]
+        accept_unverified: bool,
+        #[command(flatten)]
+        connection: ConnectionArgs,
+        #[arg(long)]
+        json: bool,
+    },
     /// Queue one final-profile take.
     Render {
         #[arg(long, value_name = "PROJECT_ID")]

@@ -69,8 +69,15 @@ impl WorkerRuntime {
             WorkerCommand::ApplyScript { bundle_json } => self.apply_script(request, bundle_json),
             WorkerCommand::ApproveScript => self.approve_script(request, None),
             WorkerCommand::Approve { approval_id } => self.approve(request, approval_id),
-            WorkerCommand::AuditionShot { shot_id } => self.enqueue_shot(request, shot_id, true),
-            WorkerCommand::RenderShot { shot_id } => self.enqueue_shot(request, shot_id, false),
+            WorkerCommand::AuditionShot { shot_id } => {
+                self.enqueue_shot(request, shot_id, true, false, None)
+            }
+            WorkerCommand::SmokeTestShot { shot_id, seed } => {
+                self.enqueue_shot(request, shot_id, true, true, *seed)
+            }
+            WorkerCommand::RenderShot { shot_id } => {
+                self.enqueue_shot(request, shot_id, false, false, None)
+            }
             WorkerCommand::RetryShot { shot_id } => self.retry_shot(request, shot_id),
             WorkerCommand::SelectTake { shot_id, take_id } => {
                 self.mutate_take(request, shot_id, take_id, TakeMutation::Select)
@@ -550,6 +557,8 @@ impl WorkerRuntime {
         request: &ClientRequest,
         shot_id: &str,
         audition: bool,
+        allow_unverified: bool,
+        seed_override: Option<u64>,
     ) -> WorkerReply {
         let Some(expected_revision) = request.expected_revision else {
             return missing_revision(request);
@@ -706,18 +715,19 @@ impl WorkerRuntime {
             }
             Err(error) => return store_failure(request, error),
         }
-        let adapter_fingerprint = match self.adapter_fingerprint(shot.operation, profile) {
-            Ok(fingerprint) => fingerprint,
-            Err(error) => {
-                return failure(
-                    request,
-                    error.code,
-                    error.message,
-                    error.retryable,
-                    Some(state.revision),
-                );
-            }
-        };
+        let adapter_fingerprint =
+            match self.adapter_fingerprint_with_policy(shot.operation, profile, allow_unverified) {
+                Ok(fingerprint) => fingerprint,
+                Err(error) => {
+                    return failure(
+                        request,
+                        error.code,
+                        error.message,
+                        error.retryable,
+                        Some(state.revision),
+                    );
+                }
+            };
         if self.queue.revision == u64::MAX {
             return failure(
                 request,
@@ -733,7 +743,8 @@ impl WorkerRuntime {
         let reserved_take_id = format!("TAKE-{}", Ulid::new());
         let seed_hash =
             crate::store::sha256_bytes(format!("{}:{job_id}", request.command_id).as_bytes());
-        let direct_seed = u64::from_str_radix(&seed_hash[..16], 16).unwrap_or(0);
+        let direct_seed =
+            seed_override.unwrap_or_else(|| u64::from_str_radix(&seed_hash[..16], 16).unwrap_or(0));
         let selected_parent_id = if audition {
             None
         } else {
@@ -808,12 +819,17 @@ impl WorkerRuntime {
             profile: profile.clone(),
             input_hash,
             adapter_fingerprint,
+            smoke_test: allow_unverified,
             parent_take_id,
             promotion_strategy,
             state: JobState::Queued,
             attempts: Vec::new(),
         };
-        let audition_target_takes = audition.then_some(shot.generation_plan.audition_takes);
+        let audition_target_takes = audition.then_some(if allow_unverified {
+            1
+        } else {
+            shot.generation_plan.audition_takes
+        });
         let state = match store.enqueue_job_with_audition_target(
             &job,
             expected_revision,
@@ -847,7 +863,11 @@ impl WorkerRuntime {
                 Some(snapshot.revision),
                 Some(snapshot),
                 if audition {
-                    "audition take queued"
+                    if allow_unverified {
+                        "unverified adapter smoke-test take queued"
+                    } else {
+                        "audition take queued"
+                    }
                 } else {
                     "final take queued"
                 },

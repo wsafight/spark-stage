@@ -2,7 +2,7 @@
 
 SparkStage turns an externally authored, validated shot contract into a resumable local video production workflow for DGX Spark and MiniMax H3.
 
-The Rust control plane, Ratatui console, immutable reference assets, deterministic SRT/VTT delivery, external-Agent evaluation reports, local milestone hooks, offline project portability, and non-GPU regression suite are implemented. MiniMax H3 workflow capabilities and DGX Spark performance remain unverified until hardware smoke tests and benchmark evidence are recorded.
+The Rust control plane, Ratatui console, immutable reference assets, deterministic SRT/VTT delivery, external-Agent evaluation reports, local milestone hooks, offline project portability, and non-GPU regression suite are implemented. The checked-in MiniMax H3 T2V workflow is smoke-tested on this DGX Spark; I2V, FLF2V, R2V, and performance profiles remain unverified until separate hardware evidence is recorded.
 
 Validate an externally authored script contract:
 
@@ -69,7 +69,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo llvm-cov --all-targets --all-features --fail-under-lines 70
 ```
 
-The current local non-GPU baseline is 232 tests. The most recently recorded line coverage is 70.07%, with CI retaining a 70% gate; this change did not rerun coverage. Critical pure logic is held to a higher 85%+ target where practical. DGX/H3 execution paths remain outside every local claim until hardware evidence exists.
+The current local non-GPU baseline is 243 tests (240 unit tests plus 3 CLI integration tests). The most recently recorded line coverage is 70.07%, with CI retaining a 70% gate; this change did not rerun coverage. Critical pure logic is held to a higher 85%+ target where practical. The T2V hardware claim is based on the separately recorded DGX smoke test, not the non-GPU suite.
 
 - [Product document](docs/product.md)
 - [Technical design](docs/technical.md)

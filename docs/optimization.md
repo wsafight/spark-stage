@@ -1,8 +1,8 @@
 # SparkStage MiniMax H3 性能与质量优化验证计划
 
 **版本**：0.2<br>
-**日期**：2026-08-26<br>
-**状态**：待基线实测<br>
+**日期**：2026-08-29<br>
+**状态**：T2V 单镜 smoke 已完成；audition profile 优化仍待质量准入<br>
 **适用环境**：NVIDIA DGX Spark（GB10）+ 本机 MiniMax H3 + ComfyUI<br>
 **对应产品文档**：[product.md](product.md)
 
@@ -12,7 +12,7 @@
 
 这份文档只回答一件事：怎样在 DGX Spark 上让 MiniMax H3 的出镜链路更快、更稳，同时能证明画质、人物一致性和音画同步没有被不可接受地破坏。
 
-当前已知对照组是 **5 秒 / 960x544 / 12 步约 4 分钟**。这个数字只作为待复测起点，不直接当成优化结论。所有候选方案都必须在同一套 workflow、分镜、输入、seed 组和输出规格下与基线对照。
+当前已记录的生产对照是 **5 秒 / 960x544 / 24 fps / 124 帧 / 20 步，455.108 秒**。同一 prompt、shape 和固定 seed 的 12 步 audition 三 seed 探索为 267.483–267.920 秒，但其中一个 seed 有 1.875 秒冻结段；当前 audition 的 30% 冻结占比门禁会拒绝该样本，因此 12 步仍是待准入的探索结果，不是默认 profile。所有候选方案都必须在同一套 workflow、分镜、输入、seed 组和输出规格下与对照组比较。
 
 这不是安装清单。一个包能安装、一个 ComfyUI 节点能加载，都不等于 MiniMax H3 的实际 workflow 已经使用它。只有完成调用链确认、性能测量和质量复核，能力才能标为 `verified`。
 
@@ -64,6 +64,10 @@
 - 统一色彩空间和交付编码
 
 ## 4. 环境指纹
+
+### 4.1 当前 DGX 证据
+
+2026-08-29 已完成当前 workflow 的单镜 T2V 认证：生产 worker 以 20 步、960x544、24 fps、124 帧完成一条 5.167 秒 H.264 + AAC 立体声 take，耗时 455.108 秒，六项媒体硬检查和首尾边界帧均通过。随后用相同 prompt、shape、模型和固定 seed 做了 12 步 audition 三 seed 探索，耗时 267.483–267.920 秒（约快 41%），但 seed=42 有 1.875 秒冻结段。旧的 95% 冻结门禁曾把它记为通过；当前 adapter 的 profile 门禁为 baseline/audition 30%、final 20%，该样本占比 36.3%，会在产出晋级前失败。该结果只支持“12 步值得继续实验”，不支持切换默认 profile；正式 adapter 仍使用 workflow 的 20 步默认。完整 job、take、benchmark run 和输出路径见 [`docs/evidence/h3-t2v-2026-08-29.md`](evidence/h3-t2v-2026-08-29.md)。
 
 每次 benchmark 在启动前冻结以下信息；任一关键项变化都建立新基线，不能和旧结果直接混算。
 

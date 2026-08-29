@@ -1,0 +1,30 @@
+schema_version: "1.0"
+adapter: minimax-h3-comfy
+enabled: true
+endpoint: http://127.0.0.1:8188
+allow_remote: false
+allow_global_interrupt: false
+workflow: ../workflows/minimax-h3-api.json
+output_node: "14"
+duration_binding_unit: frames
+model_fingerprint: "unet=sha256:37c0da793e20ca735272ec2be655f08a2e10f97a3ec8fdfb40f5b39a736ed6fe|clip=sha256:600d567f6a9629c8574e8e7041b199bdd9c59a986afa7906910a81919610607d|video_vae=sha256:7c1f131492e7eddacaac9069a61b81bdd39de5cc96561e677c5eab1cdce5e522|audio_vae=sha256:8e505d95dd1561d47abd43d4238fd40d9bb1ae9e147ed0a4cba778d76ae4db48"
+bindings:
+  prompt: { node: "5", input: "prompt" }
+  seed: { node: "9", input: "noise_seed" }
+  output_prefix: { node: "14", input: "filename_prefix" }
+optional_bindings:
+  width: { node: "5", input: "width" }
+  height: { node: "5", input: "height" }
+  fps: { node: "13", input: "fps" }
+  duration_seconds: { node: "5", input: "length" }
+  reference_images: { node: "5", input: "ref_images" }
+  steps: { node: "7", input: "steps" }
+profiles:
+  baseline: {}
+  audition: {}
+  final: {}
+media_check_profiles:
+  baseline: { max_freeze_ratio: 0.30 }
+  audition: { max_freeze_ratio: 0.30 }
+  final: { max_freeze_ratio: 0.20 }
+verified_operations: [t2v]

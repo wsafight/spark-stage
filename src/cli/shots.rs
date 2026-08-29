@@ -13,6 +13,22 @@ pub(super) fn execute_shots(args: ShotsArgs) -> Result<ExitCode, CliError> {
             IpcCommand::AuditionShot { shot_id: shot },
             json,
         ),
+        ShotsCommand::SmokeTest {
+            project,
+            shot,
+            seed,
+            accept_unverified: _,
+            connection,
+            json,
+        } => (
+            project,
+            connection,
+            IpcCommand::SmokeTestShot {
+                shot_id: shot,
+                seed,
+            },
+            json,
+        ),
         ShotsCommand::Render {
             project,
             shot,

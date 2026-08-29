@@ -521,7 +521,13 @@ async fn collect_output(
             return;
         }
     };
-    let report = match media::inspect(&downloaded.path, context.shot.duration, true) {
+    let media_check_policy = adapter.config().media_check_policy(&context.job.profile);
+    let report = match media::inspect_with_policy(
+        &downloaded.path,
+        context.shot.duration,
+        true,
+        media_check_policy,
+    ) {
         Ok(report) => report,
         Err(error) => {
             output_error(
@@ -643,6 +649,7 @@ fn generation_request(context: &ExecutionContext, request_id: String) -> Generat
     let conditioning = context.shot.conditioning.as_ref();
     GenerationRequest {
         request_id,
+        project_root: context.project_root.clone(),
         operation: context.job.operation,
         prompt: context.job.resolved_prompt.clone(),
         seed: context.job.seed,
@@ -653,6 +660,9 @@ fn generation_request(context: &ExecutionContext, request_id: String) -> Generat
         profile: context.job.profile.clone(),
         first_frame: conditioning.and_then(|value| value.first_frame.clone()),
         last_frame: conditioning.and_then(|value| value.last_frame.clone()),
+        reference_images: conditioning
+            .map(|value| value.reference_images.clone())
+            .unwrap_or_default(),
         reference_video: conditioning.and_then(|value| value.reference_video.clone()),
     }
 }

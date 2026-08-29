@@ -52,30 +52,139 @@ pub(super) fn validate_workflow(
                 errors.push("workflow node has no class_type".to_owned());
                 continue;
             };
-            if object_info.get(class_type).is_none() {
+            let Some(node_info) = object_info.get(class_type) else {
                 missing_nodes.insert(class_type.to_owned());
+                continue;
+            };
+            if node_info.get("input").is_some() {
+                for input in node
+                    .get("inputs")
+                    .and_then(Value::as_object)
+                    .into_iter()
+                    .flat_map(|inputs| inputs.keys())
+                {
+                    if !object_info_input_exists(node_info, input) {
+                        errors.push(format!(
+                            "workflow node `{class_type}` has input `{input}` not reported by ComfyUI"
+                        ));
+                    }
+                }
             }
         }
+        validate_dynamic_bindings(config, nodes, object_info, &mut errors, &mut missing_nodes);
     }
     let mut missing_nodes = missing_nodes.into_iter().collect::<Vec<_>>();
     missing_nodes.sort();
     (errors, missing_nodes)
 }
 
+fn object_info_input_exists(node_info: &Value, input: &str) -> bool {
+    ["required", "optional", "hidden"].into_iter().any(|group| {
+        node_info
+            .pointer(&format!("/input/{group}"))
+            .and_then(Value::as_object)
+            .is_some_and(|inputs| inputs.contains_key(input))
+    })
+}
+
+fn object_info_input<'a>(node_info: &'a Value, input: &str) -> Option<&'a Value> {
+    ["required", "optional"].into_iter().find_map(|group| {
+        node_info
+            .pointer(&format!("/input/{group}"))
+            .and_then(|inputs| inputs.get(input))
+    })
+}
+
+fn validate_dynamic_bindings(
+    config: &ComfyAdapterConfig,
+    workflow: &Map<String, Value>,
+    object_info: &Value,
+    errors: &mut Vec<String>,
+    missing_nodes: &mut HashSet<String>,
+) {
+    for (name, expected_input, prefix, slot, helpers) in [
+        (
+            "reference_images",
+            "ref_images",
+            "ref_image_",
+            "ref_image",
+            &["LoadImage"][..],
+        ),
+        (
+            "reference_video",
+            "ref_videos",
+            "ref_video_",
+            "ref_video",
+            &["LoadVideo", "GetVideoComponents"][..],
+        ),
+    ] {
+        let Some(binding) = config
+            .bindings
+            .get(name)
+            .or_else(|| config.optional_bindings.get(name))
+        else {
+            continue;
+        };
+        for helper in helpers {
+            if object_info.get(*helper).is_none() {
+                missing_nodes.insert((*helper).to_owned());
+            }
+        }
+        if binding.input != expected_input {
+            errors.push(format!(
+                "binding `{name}` must target H3 input `{expected_input}`, not `{}`",
+                binding.input
+            ));
+            continue;
+        }
+        let Some(class_type) = workflow
+            .get(&binding.node)
+            .and_then(|node| node.get("class_type"))
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
+        let Some(schema) = object_info
+            .get(class_type)
+            .and_then(|node_info| object_info_input(node_info, &binding.input))
+        else {
+            continue;
+        };
+        let input_type = schema.get(0).and_then(Value::as_str);
+        let actual_prefix = schema.pointer("/1/template/prefix").and_then(Value::as_str);
+        let slot_type = schema
+            .pointer(&format!("/1/template/input/required/{slot}/0"))
+            .and_then(Value::as_str);
+        if input_type != Some("COMFY_AUTOGROW_V3")
+            || actual_prefix != Some(prefix)
+            || slot_type != Some("IMAGE")
+        {
+            errors.push(format!(
+                "binding `{name}` does not match the installed H3 `{expected_input}` IMAGE autogrow schema"
+            ));
+        }
+    }
+}
+
 pub(super) fn fill_operation_capabilities(
     report: &mut CapabilityReport,
     config: &ComfyAdapterConfig,
 ) {
+    let has_binding = |name: &str| {
+        config.bindings.contains_key(name) || config.optional_bindings.contains_key(name)
+    };
     for (name, required) in [
         ("t2v", Vec::<&str>::new()),
         ("i2v", vec!["first_frame"]),
         ("flf2v", vec!["first_frame", "last_frame"]),
-        ("r2v", vec!["reference_video"]),
+        ("r2v", Vec::new()),
     ] {
         let missing = required
             .into_iter()
-            .filter(|binding| !config.optional_bindings.contains_key(*binding))
+            .filter(|binding| !has_binding(binding))
             .collect::<Vec<_>>();
+        let r2v_reference_binding =
+            name == "r2v" && !has_binding("reference_images") && !has_binding("reference_video");
         let (status, reason) = if !report.available {
             (
                 CapabilityStatus::Unavailable,
@@ -86,10 +195,14 @@ pub(super) fn fill_operation_capabilities(
                 CapabilityStatus::Unavailable,
                 "workflow or node validation failed".to_owned(),
             )
-        } else if !missing.is_empty() {
+        } else if !missing.is_empty() || r2v_reference_binding {
             (
                 CapabilityStatus::Unsupported,
-                format!("missing bindings: {}", missing.join(", ")),
+                if r2v_reference_binding {
+                    "missing bindings: reference_images or reference_video".to_owned()
+                } else {
+                    format!("missing bindings: {}", missing.join(", "))
+                },
             )
         } else if config
             .verified_operations
@@ -247,7 +360,7 @@ pub(super) fn validate_file_component(value: &str) -> Result<(), AdapterError> {
     Ok(())
 }
 
-fn validate_relative_path(path: &Path) -> Result<(), AdapterError> {
+pub(super) fn validate_relative_path(path: &Path) -> Result<(), AdapterError> {
     if path.is_absolute()
         || path
             .components()

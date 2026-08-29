@@ -6,6 +6,15 @@ impl WorkerRuntime {
         operation: Operation,
         profile: &str,
     ) -> Result<String, GenerationGateError> {
+        self.adapter_fingerprint_with_policy(operation, profile, false)
+    }
+
+    pub(super) fn adapter_fingerprint_with_policy(
+        &self,
+        operation: Operation,
+        profile: &str,
+        allow_unverified: bool,
+    ) -> Result<String, GenerationGateError> {
         let path = self
             .adapter_config
             .as_ref()
@@ -28,10 +37,11 @@ impl WorkerRuntime {
             });
         }
         let operation_name = operation_name(operation);
-        if !config
-            .verified_operations
-            .iter()
-            .any(|verified| verified == operation_name)
+        if !allow_unverified
+            && !config
+                .verified_operations
+                .iter()
+                .any(|verified| verified == operation_name)
         {
             return Err(GenerationGateError {
                 code: "CAPABILITY_MISS",
@@ -49,13 +59,28 @@ impl WorkerRuntime {
             });
         }
         for required in operation_bindings(operation) {
-            if !config.optional_bindings.contains_key(*required) {
+            if !config.bindings.contains_key(*required)
+                && !config.optional_bindings.contains_key(*required)
+            {
                 return Err(GenerationGateError {
                     code: "CAPABILITY_MISS",
                     message: format!("operation `{operation_name}` requires binding `{required}`"),
                     retryable: false,
                 });
             }
+        }
+        if operation == Operation::R2v
+            && !config.bindings.contains_key("reference_images")
+            && !config.optional_bindings.contains_key("reference_images")
+            && !config.bindings.contains_key("reference_video")
+            && !config.optional_bindings.contains_key("reference_video")
+        {
+            return Err(GenerationGateError {
+                code: "CAPABILITY_MISS",
+                message: "operation `r2v` requires binding `reference_images` or `reference_video`"
+                    .to_owned(),
+                retryable: false,
+            });
         }
         let adapter = ComfyAdapter::new(config.clone()).map_err(|error| GenerationGateError {
             code: "ADAPTER_CONFIG_INVALID",
@@ -215,7 +240,7 @@ impl WorkerRuntime {
             WorkerRunError::Recovery("queued job has no adapter config".to_owned())
         })?;
         let actual_fingerprint = self
-            .adapter_fingerprint(job.operation, &job.profile)
+            .adapter_fingerprint_with_policy(job.operation, &job.profile, job.smoke_test)
             .map_err(|error| {
                 WorkerRunError::Recovery(format!(
                     "queued job `{}` cannot use the current adapter: {}",
