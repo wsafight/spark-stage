@@ -1,0 +1,63 @@
+---
+import { getCollection } from 'astro:content';
+import DocsLayout from '../layouts/DocsLayout.astro';
+
+const entries = await getCollection('docs');
+const labels: Record<string, { title: string; summary: string; group: string }> = {
+  overview: { title: '项目总览', summary: '理解 SparkStage 解决的问题、生产流程和当前能力边界。', group: '核心文档' },
+  principles: { title: '原理分析', summary: '合同优先、单镜原子化、单写者和证据驱动质量门。', group: '核心文档' },
+  architecture: { title: '系统架构', summary: '从 CLI 和 TUI 到 worker、ComfyUI、媒体检查与构建交付。', group: '核心文档' },
+  operations: { title: '运行手册', summary: '从 brief、参考素材和审批，到重试、拼片和归档。', group: '核心文档' },
+  quality: { title: '质量与验证', summary: 'DGX Spark 实证、媒体硬检查和能力认证边界。', group: '核心文档' },
+  product: { title: '产品文档', summary: '产品边界、用户流程和明确不做的事项。', group: '设计依据' },
+  technical: { title: '技术设计', summary: 'Rust 模块、持久化、IPC、worker 与 adapter 约束。', group: '设计依据' },
+  'p0-features': { title: 'P0 功能清单', summary: '控制面能力和阶段性验收结果。', group: '设计依据' },
+  optimization: { title: 'H3 优化计划', summary: '性能实验、准入标准和后续优化方向。', group: '设计依据' },
+};
+const orderedEntries = entries
+  .filter((entry) => !entry.id.startsWith('evidence/') && entry.id.toLowerCase() !== 'readme')
+  .sort((a, b) => (labels[a.id]?.group === labels[b.id]?.group ? a.id.localeCompare(b.id) : labels[a.id]?.group === '核心文档' ? -1 : 1));
+---
+
+<DocsLayout title="文档首页" currentPath="/">
+  <div class="hero">
+    <p class="kicker">DGX SPARK · LOCAL-FIRST AI PRODUCTION</p>
+    <h1>把一次生成，变成一条可追溯的制片流程。</h1>
+    <p class="lede">SparkStage 是运行在 NVIDIA DGX Spark 上的本机优先 AI 制片控制面。它把结构化剧本合同交给 ComfyUI / MiniMax H3 逐镜生成，再通过质量检查、人工决策和确定性拼片交付视频。</p>
+    <div class="hero-meta"><span><i></i>Rust control plane</span><span><i></i>ComfyUI adapter</span><span><i></i>Evidence-first</span></div>
+  </div>
+
+  <div class="section-heading"><h2>开始阅读</h2><span>{orderedEntries.length} 篇文档</span></div>
+  <div class="doc-grid">
+    {orderedEntries.map((entry) => {
+      const meta = labels[entry.id] ?? { title: entry.id, summary: '项目补充资料。', group: '设计依据' };
+      return <a class="doc-card" href={`/docs/${entry.id}`}><span class="doc-group">{meta.group}</span><h3>{meta.title}</h3><p>{meta.summary}</p><span class="read-link">阅读文档 <span aria-hidden="true">→</span></span></a>;
+    })}
+  </div>
+
+  <div class="principle-strip"><div><p class="kicker">DESIGN PRINCIPLE</p><h2>能力声明必须由证据驱动。</h2></div><a href="/docs/quality">查看质量与验证 <span aria-hidden="true">↗</span></a></div>
+</DocsLayout>
+
+<style>
+  .hero { border-bottom: 1px solid var(--line); padding-bottom: 43px; }
+  .kicker { color: var(--accent); font-size: 10px; font-weight: 800; letter-spacing: .14em; margin: 0 0 16px; }
+  .hero h1 { font-size: clamp(34px, 5vw, 57px); letter-spacing: 0; line-height: 1.08; margin: 0; max-width: 680px; }
+  .lede { color: var(--muted); font-size: 17px; line-height: 1.7; margin: 23px 0 0; max-width: 720px; }
+  .hero-meta { color: var(--muted); display: flex; flex-wrap: wrap; font-size: 12px; gap: 17px; margin-top: 28px; }
+  .hero-meta span { align-items: center; display: inline-flex; gap: 7px; }
+  .hero-meta i { background: var(--warm); border-radius: 50%; display: inline-block; height: 7px; width: 7px; }
+  .section-heading { align-items: baseline; display: flex; justify-content: space-between; margin: 36px 0 14px; }
+  .section-heading h2 { font-size: 23px; margin: 0; }
+  .section-heading span { color: var(--muted); font-size: 12px; }
+  .doc-grid { display: grid; gap: 10px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .doc-card { background: #fff; border: 1px solid var(--line); border-radius: 6px; display: flex; flex-direction: column; min-height: 185px; padding: 20px; text-decoration: none; transition: border-color .15s ease, transform .15s ease; }
+  .doc-card:hover { border-color: var(--accent); transform: translateY(-2px); }
+  .doc-group { color: var(--accent); font-size: 10px; font-weight: 750; letter-spacing: .09em; text-transform: uppercase; }
+  .doc-card h3 { font-size: 18px; margin: 13px 0 5px; }
+  .doc-card p { color: var(--muted); font-size: 13px; line-height: 1.55; margin: 0; }
+  .read-link { color: var(--accent-dark); font-size: 12px; font-weight: 700; margin-top: auto; padding-top: 16px; }
+  .principle-strip { align-items: center; background: #e7f2ee; border-left: 3px solid var(--accent); display: flex; justify-content: space-between; margin-top: 48px; padding: 21px 23px; }
+  .principle-strip h2 { font-size: 19px; margin: 5px 0 0; }
+  .principle-strip a { color: var(--accent-dark); font-size: 12px; font-weight: 700; text-decoration: none; }
+  @media (max-width: 600px) { .doc-grid { grid-template-columns: 1fr; } .principle-strip { align-items: flex-start; display: block; } .principle-strip a { display: block; margin-top: 15px; } .lede { font-size: 16px; } }
+</style>

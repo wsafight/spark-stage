@@ -1,0 +1,14 @@
+{
+  "name": "sparkstage-docs",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview"
+  },
+  "devDependencies": {
+    "astro": "^5.16.11",
+    "typescript": "^5.8.3"
+  }
+}

@@ -75,5 +75,11 @@ The current local non-GPU baseline is 243 tests (240 unit tests plus 3 CLI integ
 - [Technical design](docs/technical.md)
 - [H3 optimization plan](docs/optimization.md)
 - [P0 product feature checklist](docs/p0-features.md)
+- [Documentation index](docs/README.md)
+- [Principles analysis](docs/principles.md)
+- [System architecture](docs/architecture.md)
+- [Operations guide](docs/operations.md)
+- [Quality and evidence](docs/quality.md)
+- [Astro documentation site](astro/README.md)
 
 Rust is pinned to `1.98.0` with edition `2024`.

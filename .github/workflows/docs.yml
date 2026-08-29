@@ -1,0 +1,40 @@
+name: Documentation
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  docs:
+    name: Documentation checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Check documentation links and placeholders
+        run: sh scripts/check-docs.sh
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: astro/package-lock.json
+      - name: Install Astro dependencies
+        working-directory: astro
+        run: npm ci
+      - name: Build Astro documentation site
+        working-directory: astro
+        run: npm run build
+      - name: Check Rust formatting
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+          components: rustfmt
+      - run: cargo fmt --all --check

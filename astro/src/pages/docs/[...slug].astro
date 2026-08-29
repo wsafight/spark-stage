@@ -1,0 +1,36 @@
+---
+import { getCollection, render } from 'astro:content';
+import DocsLayout from '../../layouts/DocsLayout.astro';
+
+export async function getStaticPaths() {
+  const entries = await getCollection('docs');
+  return entries.filter((entry) => entry.id.toLowerCase() !== 'readme').map((entry) => {
+    const slug = entry.id.replace(/\.md$/, '');
+    return {
+      params: { slug: slug === 'README' ? undefined : slug },
+      props: { entry },
+    };
+  });
+}
+
+const { entry } = Astro.props;
+const { Content } = await render(entry);
+const path = entry.id.replace(/\.md$/, '');
+const titleMap: Record<string, string> = {
+  overview: '项目总览',
+  principles: '原理分析',
+  architecture: '系统架构',
+  operations: '运行手册',
+  quality: '质量与验证',
+  product: '产品文档',
+  technical: '技术设计',
+  'p0-features': 'P0 功能清单',
+  optimization: 'H3 优化计划',
+};
+const title = titleMap[path] ?? titleMap[path.toLowerCase()] ?? path.split('/').at(-1) ?? '文档';
+const currentPath = `/docs/${path}`;
+---
+
+<DocsLayout title={title} currentPath={currentPath}>
+  <Content />
+</DocsLayout>

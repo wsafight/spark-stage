@@ -1,0 +1,146 @@
+---
+interface Props {
+  title: string;
+  description?: string;
+  currentPath?: string;
+}
+
+const { title, description = 'SparkStage 本机优先 AI 制片控制面的工程文档。', currentPath = '' } = Astro.props;
+
+const navigation = [
+  { href: '/docs/overview', label: '项目总览' },
+  { href: '/docs/principles', label: '原理分析' },
+  { href: '/docs/architecture', label: '系统架构' },
+  { href: '/docs/operations', label: '运行手册' },
+  { href: '/docs/quality', label: '质量与验证' },
+];
+
+const referenceNavigation = [
+  { href: '/docs/product', label: '产品文档' },
+  { href: '/docs/technical', label: '技术设计' },
+  { href: '/docs/p0-features', label: 'P0 功能清单' },
+  { href: '/docs/optimization', label: 'H3 优化计划' },
+];
+---
+
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width" />
+    <meta name="description" content={description} />
+    <title>{title} · SparkStage</title>
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="SparkStage 文档首页">
+        <span class="brand-mark">S</span>
+        <span>SparkStage <small>DOCS</small></span>
+      </a>
+      <a class="source-link" href="https://astro.build/" rel="noreferrer">Astro 框架 <span aria-hidden="true">↗</span></a>
+    </header>
+
+    <div class="shell">
+      <aside class="sidebar" aria-label="文档导航">
+        <p class="eyebrow">DOCUMENTATION</p>
+        <nav>
+          <p class="nav-heading">核心文档</p>
+          {navigation.map((item) => (
+            <a class:list={{ active: currentPath === item.href }} href={item.href}>{item.label}</a>
+          ))}
+          <p class="nav-heading reference-heading">设计依据</p>
+          {referenceNavigation.map((item) => (
+            <a class:list={{ active: currentPath === item.href }} href={item.href}>{item.label}</a>
+          ))}
+        </nav>
+        <div class="sidebar-note">
+          <span class="status-dot"></span>
+          <div><strong>本机优先</strong><br /><small>DGX Spark · ComfyUI · H3</small></div>
+        </div>
+      </aside>
+
+      <main class="content">
+        <div class="breadcrumbs"><a href="/">文档</a><span>/</span><span>{title}</span></div>
+        <article class="prose">
+          <slot />
+        </article>
+        <footer class="footer">
+          <span>内容源自仓库根目录 <code>docs/</code></span>
+          <a href="/">返回文档索引</a>
+        </footer>
+      </main>
+    </div>
+  </body>
+</html>
+
+<style is:global>
+  :root {
+    --ink: #17231f;
+    --muted: #60716a;
+    --line: #d7e1dc;
+    --soft: #f3f7f5;
+    --paper: #fbfcfb;
+    --accent: #0b806c;
+    --accent-dark: #075b4c;
+    --warm: #efb34a;
+  }
+
+  * { box-sizing: border-box; }
+  html { background: var(--paper); color: var(--ink); font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  body { margin: 0; min-width: 320px; }
+  a { color: inherit; }
+  .topbar { align-items: center; background: #fff; border-bottom: 1px solid var(--line); display: flex; height: 68px; justify-content: space-between; padding: 0 clamp(20px, 4vw, 64px); position: sticky; top: 0; z-index: 10; }
+  .brand { align-items: center; color: var(--ink); display: flex; font-size: 15px; font-weight: 750; gap: 10px; letter-spacing: .02em; text-decoration: none; }
+  .brand small { color: var(--muted); font-size: 10px; font-weight: 650; letter-spacing: .16em; margin-left: 5px; }
+  .brand-mark { align-items: center; background: var(--accent); border-radius: 7px; color: #fff; display: inline-flex; font-size: 15px; height: 30px; justify-content: center; width: 30px; }
+  .source-link { color: var(--muted); font-size: 13px; text-decoration: none; }
+  .source-link:hover, .footer a:hover { color: var(--accent-dark); }
+  .shell { display: grid; grid-template-columns: 248px minmax(0, 1fr); margin: 0 auto; max-width: 1280px; }
+  .sidebar { border-right: 1px solid var(--line); min-height: calc(100vh - 68px); padding: 42px 24px 28px 30px; position: sticky; top: 68px; }
+  .eyebrow, .nav-heading { color: var(--muted); font-size: 10px; font-weight: 750; letter-spacing: .14em; margin: 0; text-transform: uppercase; }
+  .nav-heading { letter-spacing: .08em; margin: 32px 0 10px; }
+  .reference-heading { margin-top: 30px; }
+  nav a { border-left: 2px solid transparent; color: #4f625a; display: block; font-size: 14px; margin: 2px 0; padding: 8px 12px; text-decoration: none; }
+  nav a:hover { color: var(--accent-dark); }
+  nav a.active { background: #e7f2ee; border-left-color: var(--accent); color: var(--accent-dark); font-weight: 700; }
+  .sidebar-note { align-items: center; background: var(--soft); border: 1px solid var(--line); border-radius: 6px; bottom: 28px; color: var(--ink); display: flex; font-size: 12px; gap: 9px; left: 24px; line-height: 1.5; padding: 11px 12px; position: absolute; right: 20px; }
+  .sidebar-note small { color: var(--muted); font-size: 10px; }
+  .status-dot { background: var(--warm); border-radius: 50%; box-shadow: 0 0 0 4px #f9efd9; flex: 0 0 auto; height: 8px; width: 8px; }
+  .content { min-width: 0; padding: 38px clamp(24px, 6vw, 86px) 50px; }
+  .breadcrumbs { color: var(--muted); display: flex; font-size: 12px; gap: 9px; margin: 0 auto 30px; max-width: 800px; }
+  .breadcrumbs a { text-decoration: none; }
+  .breadcrumbs a:hover { color: var(--accent-dark); }
+  .prose { font-size: 16px; line-height: 1.82; margin: 0 auto; max-width: 800px; }
+  .prose h1 { font-size: clamp(30px, 4vw, 46px); letter-spacing: 0; line-height: 1.12; margin: 0 0 24px; }
+  .prose h2 { border-top: 1px solid var(--line); font-size: 25px; line-height: 1.3; margin: 52px 0 16px; padding-top: 22px; }
+  .prose h3 { font-size: 19px; line-height: 1.4; margin: 32px 0 12px; }
+  .prose p { margin: 0 0 18px; }
+  .prose a { color: var(--accent-dark); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+  .prose li { margin: 5px 0; }
+  .prose code { background: #eaf0ed; border-radius: 3px; color: var(--accent-dark); font-size: .88em; padding: 2px 5px; }
+  .prose pre { background: #17231f; border-radius: 6px; color: #e4f0eb; overflow-x: auto; padding: 18px 20px; }
+  .prose pre code { background: transparent; color: inherit; padding: 0; }
+  .prose table { border-collapse: collapse; display: block; margin: 22px 0; max-width: 100%; overflow-x: auto; width: max-content; }
+  .prose th, .prose td { border: 1px solid var(--line); padding: 8px 12px; text-align: left; vertical-align: top; }
+  .prose th { background: var(--soft); font-weight: 700; }
+  .prose blockquote { border-left: 3px solid var(--warm); color: var(--muted); margin: 22px 0; padding-left: 18px; }
+  .footer { border-top: 1px solid var(--line); color: var(--muted); display: flex; font-size: 12px; justify-content: space-between; margin: 60px auto 0; max-width: 800px; padding-top: 17px; }
+  .footer a { color: var(--accent-dark); text-decoration: none; }
+  @media (max-width: 760px) {
+    .topbar { height: 58px; padding: 0 18px; }
+    .brand small, .source-link { display: none; }
+    .shell { display: block; }
+    .sidebar { min-height: auto; padding: 20px 18px 14px; position: static; }
+    .sidebar nav { display: flex; gap: 3px; margin-top: 8px; overflow-x: auto; padding-bottom: 3px; }
+    .nav-heading, .reference-heading, .sidebar-note { display: none; }
+    nav a { border-bottom: 2px solid transparent; border-left: 0; flex: 0 0 auto; padding: 7px 10px; }
+    nav a.active { border-bottom-color: var(--accent); border-left: 0; }
+    .content { padding: 25px 18px 38px; }
+    .breadcrumbs { margin-bottom: 24px; }
+    .prose { font-size: 15px; }
+    .prose h1 { font-size: 34px; }
+    .prose h2 { font-size: 22px; margin-top: 38px; }
+    .footer { display: block; line-height: 1.8; }
+    .footer a { display: block; margin-top: 5px; }
+  }
+</style>
