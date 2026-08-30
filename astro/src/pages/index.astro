@@ -1,6 +1,7 @@
 ---
 import { getCollection } from 'astro:content';
 import DocsLayout from '../layouts/DocsLayout.astro';
+import { withBase } from '../lib/paths';
 
 const entries = await getCollection('docs');
 const labels: Record<string, { title: string; summary: string; group: string }> = {
@@ -31,11 +32,11 @@ const orderedEntries = entries
   <div class="doc-grid">
     {orderedEntries.map((entry) => {
       const meta = labels[entry.id] ?? { title: entry.id, summary: '项目补充资料。', group: '设计依据' };
-      return <a class="doc-card" href={`/docs/${entry.id}`}><span class="doc-group">{meta.group}</span><h3>{meta.title}</h3><p>{meta.summary}</p><span class="read-link">阅读文档 <span aria-hidden="true">→</span></span></a>;
+      return <a class="doc-card" href={withBase(`/docs/${entry.id}`)}><span class="doc-group">{meta.group}</span><h3>{meta.title}</h3><p>{meta.summary}</p><span class="read-link">阅读文档 <span aria-hidden="true">→</span></span></a>;
     })}
   </div>
 
-  <div class="principle-strip"><div><p class="kicker">DESIGN PRINCIPLE</p><h2>能力声明必须由证据驱动。</h2></div><a href="/docs/quality">查看质量与验证 <span aria-hidden="true">↗</span></a></div>
+  <div class="principle-strip"><div><p class="kicker">DESIGN PRINCIPLE</p><h2>能力声明必须由证据驱动。</h2></div><a href={withBase('/docs/quality')}>查看质量与验证 <span aria-hidden="true">↗</span></a></div>
 </DocsLayout>
 
 <style>

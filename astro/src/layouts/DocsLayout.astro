@@ -1,4 +1,6 @@
 ---
+import { withBase } from '../lib/paths';
+
 interface Props {
   title: string;
   description?: string;
@@ -7,6 +9,7 @@ interface Props {
 
 const { title, description = 'SparkStage 本机优先 AI 制片控制面的工程文档。', currentPath = '' } = Astro.props;
 
+const homeHref = withBase('/');
 const navigation = [
   { href: '/docs/overview', label: '项目总览' },
   { href: '/docs/principles', label: '原理分析' },
@@ -33,7 +36,7 @@ const referenceNavigation = [
   </head>
   <body>
     <header class="topbar">
-      <a class="brand" href="/" aria-label="SparkStage 文档首页">
+      <a class="brand" href={homeHref} aria-label="SparkStage 文档首页">
         <span class="brand-mark">S</span>
         <span>SparkStage <small>DOCS</small></span>
       </a>
@@ -46,11 +49,11 @@ const referenceNavigation = [
         <nav>
           <p class="nav-heading">核心文档</p>
           {navigation.map((item) => (
-            <a class:list={{ active: currentPath === item.href }} href={item.href}>{item.label}</a>
+            <a class:list={{ active: currentPath === item.href }} href={withBase(item.href)}>{item.label}</a>
           ))}
           <p class="nav-heading reference-heading">设计依据</p>
           {referenceNavigation.map((item) => (
-            <a class:list={{ active: currentPath === item.href }} href={item.href}>{item.label}</a>
+            <a class:list={{ active: currentPath === item.href }} href={withBase(item.href)}>{item.label}</a>
           ))}
         </nav>
         <div class="sidebar-note">
@@ -60,13 +63,13 @@ const referenceNavigation = [
       </aside>
 
       <main class="content">
-        <div class="breadcrumbs"><a href="/">文档</a><span>/</span><span>{title}</span></div>
+        <div class="breadcrumbs"><a href={homeHref}>文档</a><span>/</span><span>{title}</span></div>
         <article class="prose">
           <slot />
         </article>
         <footer class="footer">
           <span>内容源自仓库根目录 <code>docs/</code></span>
-          <a href="/">返回文档索引</a>
+          <a href={homeHref}>返回文档索引</a>
         </footer>
       </main>
     </div>

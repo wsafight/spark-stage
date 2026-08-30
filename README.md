@@ -81,5 +81,6 @@ The current local non-GPU baseline is 243 tests (240 unit tests plus 3 CLI integ
 - [Operations guide](docs/operations.md)
 - [Quality and evidence](docs/quality.md)
 - [Astro documentation site](astro/README.md)
+- [Published docs](https://wsafight.github.io/spark-stage/)
 
 Rust is pinned to `1.98.0` with edition `2024`.

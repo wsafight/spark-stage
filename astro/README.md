@@ -17,3 +17,5 @@ npm run build
 ```
 
 构建输出位于 `astro/dist/`，不会提交到 Git。文档链接和占位符检查仍由根目录的 `scripts/check-docs.sh` 负责。
+
+站点按 GitHub Pages 项目路径配置，线上地址是 [https://wsafight.github.io/spark-stage/](https://wsafight.github.io/spark-stage/)。本地开发时同样挂在 `/spark-stage/` 下，例如 `http://localhost:4321/spark-stage/`。
